@@ -198,6 +198,28 @@ with tab1:
             update_streamlit=True,
         )
         
+        st.divider()
+        st.markdown("**✏️ 或手动输入区域坐标（若 Canvas 背景黑屏可用此方式）：**")
+        st.caption("根据上方参考图，读取区域左上角和右下角的像素坐标")
+        c_mx1, c_my1, c_mx2, c_my2 = st.columns(4)
+        with c_mx1:
+            mx1 = st.number_input("x1 (左)", min_value=0, value=0, key=f"manual_x1_{key_prefix}")
+        with c_my1:
+            my1 = st.number_input("y1 (上)", min_value=0, value=0, key=f"manual_y1_{key_prefix}")
+        with c_mx2:
+            mx2 = st.number_input("x2 (右)", min_value=0, value=100, key=f"manual_x2_{key_prefix}")
+        with c_my2:
+            my2 = st.number_input("y2 (下)", min_value=0, value=100, key=f"manual_y2_{key_prefix}")
+        if st.button("➕ 添加手动坐标区域", key=f"manual_add_{key_prefix}"):
+            regions_list.append({
+                "name": f"区域{len(regions_list)+1}",
+                "x1": int(mx1), "y1": int(my1), "x2": int(mx2), "y2": int(my2)
+            })
+            st.session_state[regions_key] = regions_list
+            st.rerun()
+        
+        st.divider()
+        
         # 提取 canvas 中的矩形并添加为区域
         if canvas_result.json_data is not None:
             rects = [obj for obj in canvas_result.json_data.get("objects", []) if obj.get("type") == "rect"]
