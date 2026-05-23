@@ -175,8 +175,13 @@ with tab1:
         display_h = int(h * canvas_scale)
         
         # 转为 PIL Image 传给 canvas
+        # 使用 RGBA 模式提高 Streamlit Cloud 兼容性
         bg_image = Image.fromarray(cv2.cvtColor(ref_img, cv2.COLOR_BGR2RGB))
+        bg_image = bg_image.convert("RGBA")
         bg_image = bg_image.resize((display_w, display_h))
+        
+        # 调试信息
+        st.caption(f"Canvas 尺寸: {display_w}x{display_h}, 图片模式: {bg_image.mode}")
         
         st.markdown(f"**🖱️ 在下方图片上拖拽画出截取区域（红色框），画完后点击「将画框添加为截取区域」：**")
         st.caption("提示：画得不满意可点击「清空画布」重新画；如要调整已添加区域的位置，可在下方列表中修改坐标。")
@@ -532,6 +537,7 @@ with tab1:
         display_h = int(h * canvas_scale)
         
         bg_image = Image.fromarray(cv2.cvtColor(custom_img, cv2.COLOR_BGR2RGB))
+        bg_image = bg_image.convert("RGBA")
         bg_image = bg_image.resize((display_w, display_h))
         
         st.markdown("**🖱️ 在下方图片上，在每个已填涂的选项框中心画小矩形框（红色）：**")
