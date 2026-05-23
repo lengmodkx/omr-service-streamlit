@@ -168,20 +168,19 @@ with tab1:
             st.session_state.canvas_version = st.session_state.get("canvas_version", 0) + 1
             st.rerun()
         
-        # Canvas 显示尺寸（限制最大宽度 900，避免前端渲染过慢）
-        MAX_CANVAS_WIDTH = 900
+        # Canvas 显示尺寸（限制最大宽度 700，避免前端渲染问题）
+        MAX_CANVAS_WIDTH = 700
         canvas_scale = MAX_CANVAS_WIDTH / w
         display_w = MAX_CANVAS_WIDTH
         display_h = int(h * canvas_scale)
         
         # 转为 PIL Image 传给 canvas
-        # 使用 RGBA 模式提高 Streamlit Cloud 兼容性
         bg_image = Image.fromarray(cv2.cvtColor(ref_img, cv2.COLOR_BGR2RGB))
         bg_image = bg_image.convert("RGBA")
         bg_image = bg_image.resize((display_w, display_h))
         
-        # 调试信息
-        st.caption(f"Canvas 尺寸: {display_w}x{display_h}, 图片模式: {bg_image.mode}")
+        # 备用：直接用 st.image 显示图片（如果 Canvas 背景加载失败，用户可参考此图）
+        st.image(bg_image, caption="参考图（若 Canvas 背景黑屏，请根据此图画框）", width=display_w)
         
         st.markdown(f"**🖱️ 在下方图片上拖拽画出截取区域（红色框），画完后点击「将画框添加为截取区域」：**")
         st.caption("提示：画得不满意可点击「清空画布」重新画；如要调整已添加区域的位置，可在下方列表中修改坐标。")
@@ -531,7 +530,7 @@ with tab1:
         st.session_state.custom_bubbles_img_size = (w, h)
         
         # Canvas 显示尺寸限制
-        MAX_CANVAS_WIDTH = 900
+        MAX_CANVAS_WIDTH = 700
         canvas_scale = MAX_CANVAS_WIDTH / w
         display_w = MAX_CANVAS_WIDTH
         display_h = int(h * canvas_scale)
@@ -539,6 +538,8 @@ with tab1:
         bg_image = Image.fromarray(cv2.cvtColor(custom_img, cv2.COLOR_BGR2RGB))
         bg_image = bg_image.convert("RGBA")
         bg_image = bg_image.resize((display_w, display_h))
+        
+        st.image(bg_image, caption="参考图（若 Canvas 背景黑屏，请根据此图画框）", width=display_w)
         
         st.markdown("**🖱️ 在下方图片上，在每个已填涂的选项框中心画小矩形框（红色）：**")
         st.caption("提示：框不需要很精确，框住选项即可。画完后在下方表格中填写对应的题号和选项。")
