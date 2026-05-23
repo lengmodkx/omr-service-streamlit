@@ -38,7 +38,7 @@ output/
 *.log
 
 # Streamlit
-.streamlit/
+.streamlit/*.db
 
 # OS
 .DS_Store
