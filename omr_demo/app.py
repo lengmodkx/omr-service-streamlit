@@ -36,9 +36,9 @@ def init_state():
         "ref_image_size_b": None,      # B面标定参考图尺寸 (w, h)
         "crop_results": [],            # 手动裁剪结果
         "process_mode": "模板识别模式",  # 或 "手动区域裁剪模式"
-        # 自定义选项框标定（绕过模板bubbles）
-        "custom_bubbles": [],           # 用户自定义选项框列表
-        "custom_bubbles_img_size": None,  # 标定时图片尺寸 (w, h)
+        "custom_bubbles": [],           # (已移除UI，保留兼容)
+        "custom_bubbles_img_size": None,
+        "paper_layouts": {},          # 保存的选择题版式配置 {name: {...}}
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -137,235 +137,247 @@ with tab1:
     
     # ===== 手动标定截取区域 =====
     st.header("2. 手动标定截取区域（用于批量裁剪）")
-    st.info("分别在上传的A面和B面空白答题卡上拖拽画出需要截取的区域，批量处理时会自动按A/B面对应裁剪。")
+    st.info("配置A面和B面的截取区域坐标，批量裁剪时会按比例缩放到实际图片尺寸。支持「可视化画框」和「纯坐标输入」两种模式。")
     
-    # 选择标定基准图（必须是已上传的空白答题卡）
-    available_refs = {}
-    if st.session_state.blank_a is not None:
-        available_refs["A面空白答题卡"] = st.session_state.blank_a
-    if st.session_state.blank_b is not None:
-        available_refs["B面空白答题卡"] = st.session_state.blank_b
+    calib_mode = st.radio("标定方式", ["🖼️ 上传图片画框", "✏️ 直接输入坐标"], horizontal=True, key="calib_mode")
     
-    if not available_refs:
-        st.warning("⚠️ 请先在上方的「上传空白答题卡」区域上传A面或B面空白答题卡")
-    else:
-        ref_choice = st.radio("选择标定基准图", list(available_refs.keys()), horizontal=True)
-        is_a = "A面" in ref_choice
-        regions_key = "manual_regions_a" if is_a else "manual_regions_b"
-        regions_list = st.session_state[regions_key]
-        key_prefix = "ra" if is_a else "rb"
-        
-        ref_img = available_refs[ref_choice]
-        h, w = ref_img.shape[:2]
-        size_key = "ref_image_size_a" if is_a else "ref_image_size_b"
-        st.session_state[size_key] = (w, h)
-        st.write(f"📐 图片尺寸：**{w} × {h}**")
-        
-        # 检测是否切换了基准图，如果是则自动清空画布
-        prev_choice = st.session_state.get("canvas_ref_choice", "")
-        if prev_choice != ref_choice:
-            st.session_state.canvas_ref_choice = ref_choice
-            st.session_state.canvas_version = st.session_state.get("canvas_version", 0) + 1
-            st.rerun()
-        
-        # Canvas 显示尺寸（限制最大宽度 700，避免前端渲染问题）
-        MAX_CANVAS_WIDTH = 700
-        canvas_scale = MAX_CANVAS_WIDTH / w
-        display_w = MAX_CANVAS_WIDTH
-        display_h = int(h * canvas_scale)
-        
-        # 转为 PIL Image 传给 canvas
-        bg_image = Image.fromarray(cv2.cvtColor(ref_img, cv2.COLOR_BGR2RGB))
-        bg_image = bg_image.convert("RGBA")
-        bg_image = bg_image.resize((display_w, display_h))
-        
-        # 备用：直接用 st.image 显示图片（如果 Canvas 背景加载失败，用户可参考此图）
-        st.image(bg_image, caption="参考图（若 Canvas 背景黑屏，请根据此图画框）", width=display_w)
-        
-        st.markdown(f"**🖱️ 在下方图片上拖拽画出截取区域（红色框），画完后点击「将画框添加为截取区域」：**")
-        st.caption("提示：画得不满意可点击「清空画布」重新画；如要调整已添加区域的位置，可在下方列表中修改坐标。")
-        
-        canvas_version = st.session_state.get("canvas_version", 0)
-        canvas_result = st_canvas(
-            fill_color="rgba(255, 165, 0, 0.2)",
-            stroke_width=2,
-            stroke_color="#FF0000",
-            background_image=bg_image,
-            height=display_h,
-            width=display_w,
-            drawing_mode="rect",
-            key=f"canvas_{ref_choice}_{canvas_version}",
-            update_streamlit=True,
-        )
-        
-        st.divider()
-        st.markdown("**✏️ 或手动输入区域坐标（若 Canvas 背景黑屏可用此方式）：**")
-        st.caption("根据上方参考图，读取区域左上角和右下角的像素坐标")
-        c_mx1, c_my1, c_mx2, c_my2 = st.columns(4)
-        with c_mx1:
-            mx1 = st.number_input("x1 (左)", min_value=0, value=0, key=f"manual_x1_{key_prefix}")
-        with c_my1:
-            my1 = st.number_input("y1 (上)", min_value=0, value=0, key=f"manual_y1_{key_prefix}")
-        with c_mx2:
-            mx2 = st.number_input("x2 (右)", min_value=0, value=100, key=f"manual_x2_{key_prefix}")
-        with c_my2:
-            my2 = st.number_input("y2 (下)", min_value=0, value=100, key=f"manual_y2_{key_prefix}")
-        if st.button("➕ 添加手动坐标区域", key=f"manual_add_{key_prefix}"):
-            regions_list.append({
-                "name": f"区域{len(regions_list)+1}",
-                "x1": int(mx1), "y1": int(my1), "x2": int(mx2), "y2": int(my2)
-            })
-            st.session_state[regions_key] = regions_list
-            st.rerun()
-        
-        st.divider()
-        
-        # 提取 canvas 中的矩形并添加为区域
-        if canvas_result.json_data is not None:
-            rects = [obj for obj in canvas_result.json_data.get("objects", []) if obj.get("type") == "rect"]
-            if rects:
-                st.write(f"画布上检测到 **{len(rects)}** 个矩形框")
-                col_add, col_clear = st.columns([1, 1])
-                with col_add:
-                    if st.button("➕ 将画框添加为截取区域"):
-                        for obj in rects:
-                            x1 = int(obj["left"] / canvas_scale)
-                            y1 = int(obj["top"] / canvas_scale)
-                            x2 = int((obj["left"] + obj["width"]) / canvas_scale)
-                            y2 = int((obj["top"] + obj["height"]) / canvas_scale)
-                            regions_list.append({
-                                "name": f"区域{len(regions_list)+1}",
-                                "x1": x1, "y1": y1, "x2": x2, "y2": y2
-                            })
-                        st.session_state[regions_key] = regions_list
-                        # 清空 canvas：通过更新 version 改变 key
-                        st.session_state.canvas_version = canvas_version + 1
-                        st.rerun()
-                with col_clear:
-                    if st.button("🗑️ 清空画布"):
-                        st.session_state.canvas_version = canvas_version + 1
-                        st.rerun()
+    def render_side(col, is_a, calib_mode):
+        with col:
+            side_label = "A面" if is_a else "B面"
+            st.subheader(f"📄 {side_label}")
+            regions_key = "manual_regions_a" if is_a else "manual_regions_b"
+            regions_list = st.session_state[regions_key]
+            key_prefix = "ra" if is_a else "rb"
+            size_key = "ref_image_size_a" if is_a else "ref_image_size_b"
+            
+            ref_img = None
+            canvas_scale = 1.0
+            
+            if calib_mode == "🖼️ 上传图片画框":
+                if is_a and st.session_state.blank_a is not None:
+                    ref_img = st.session_state.blank_a.copy()
+                elif not is_a and st.session_state.blank_b is not None:
+                    ref_img = st.session_state.blank_b.copy()
+                else:
+                    ref_img = None
+                
+                if ref_img is not None:
+                    h, w = ref_img.shape[:2]
+                    st.session_state[size_key] = (w, h)
+                    st.write(f"📐 图片尺寸：{w} × {h}")
+                    
+                    MAX_CANVAS_WIDTH = 700
+                    canvas_scale = MAX_CANVAS_WIDTH / w
+                    display_w = MAX_CANVAS_WIDTH
+                    display_h = int(h * canvas_scale)
+                    
+                    bg_image = Image.fromarray(cv2.cvtColor(ref_img, cv2.COLOR_BGR2RGB))
+                    bg_image = bg_image.convert("RGBA")
+                    bg_image = bg_image.resize((display_w, display_h))
+                    
+                    st.markdown("**🖱️ 拖拽画出截取区域：**")
+                    
+                    canvas_ver_key = f"canvas_version_{key_prefix}"
+                    canvas_version = st.session_state.get(canvas_ver_key, 0)
+                    canvas_result = st_canvas(
+                        fill_color="rgba(255, 165, 0, 0.2)",
+                        stroke_width=2,
+                        stroke_color="#FF0000",
+                        background_image=bg_image,
+                        height=display_h,
+                        width=display_w,
+                        drawing_mode="rect",
+                        key=f"canvas_{side_label}_{canvas_version}",
+                        update_streamlit=True,
+                    )
+                    
+                    if canvas_result.json_data is not None:
+                        rects = [obj for obj in canvas_result.json_data.get("objects", []) if obj.get("type") == "rect"]
+                        if rects:
+                            st.write(f"检测到 **{len(rects)}** 个框")
+                            col_add, col_clear = st.columns([1, 1])
+                            with col_add:
+                                if st.button("➕ 添加", key=f"btn_add_canvas_{key_prefix}"):
+                                    for obj in rects:
+                                        x1 = int(obj["left"] / canvas_scale)
+                                        y1 = int(obj["top"] / canvas_scale)
+                                        x2 = int((obj["left"] + obj["width"]) / canvas_scale)
+                                        y2 = int((obj["top"] + obj["height"]) / canvas_scale)
+                                        regions_list.append({
+                                            "name": f"区域{len(regions_list)+1}",
+                                            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                                            "type": "非选择题"
+                                        })
+                                    st.session_state[regions_key] = regions_list
+                                    st.session_state[canvas_ver_key] = canvas_version + 1
+                                    st.rerun()
+                            with col_clear:
+                                if st.button("🗑️ 清空", key=f"btn_clear_canvas_{key_prefix}"):
+                                    st.session_state[canvas_ver_key] = canvas_version + 1
+                                    st.rerun()
+                        else:
+                            st.caption("请在图片上拖拽画出矩形框")
+                else:
+                    st.warning("⚠️ 请先在上方的「上传空白答题卡」区域上传本面的空白答题卡，或切换到「直接输入坐标」模式")
+            
+            else:  # 直接输入坐标
+                col_sw, col_sh = st.columns(2)
+                with col_sw:
+                    default_w = st.session_state.ref_image_size_a[0] if (is_a and st.session_state.ref_image_size_a) else (st.session_state.ref_image_size_b[0] if st.session_state.ref_image_size_b else 1237)
+                    set_w = st.number_input("宽", min_value=1, value=default_w, key=f"set_w_{key_prefix}")
+                with col_sh:
+                    default_h = st.session_state.ref_image_size_a[1] if (is_a and st.session_state.ref_image_size_a) else (st.session_state.ref_image_size_b[1] if st.session_state.ref_image_size_b else 1741)
+                    set_h = st.number_input("高", min_value=1, value=default_h, key=f"set_h_{key_prefix}")
+                st.session_state[size_key] = (int(set_w), int(set_h))
+                
+                st.markdown("**添加新区域：**")
+                c_in = st.columns([2, 1.5, 1, 1, 1, 1])
+                with c_in[0]:
+                    in_name = st.text_input("名称", value=f"区域{len(regions_list)+1}", key=f"in_name_{key_prefix}")
+                with c_in[1]:
+                    in_type = st.selectbox("类型", ["非选择题", "选择题", "个人信息"], key=f"in_type_{key_prefix}")
+                with c_in[2]:
+                    in_x1 = st.number_input("x1", min_value=0, value=0, key=f"in_x1_{key_prefix}")
+                with c_in[3]:
+                    in_y1 = st.number_input("y1", min_value=0, value=0, key=f"in_y1_{key_prefix}")
+                with c_in[4]:
+                    in_x2 = st.number_input("x2", min_value=0, value=100, key=f"in_x2_{key_prefix}")
+                with c_in[5]:
+                    in_y2 = st.number_input("y2", min_value=0, value=100, key=f"in_y2_{key_prefix}")
+                if st.button("➕ 添加", key=f"btn_add_manual_{key_prefix}"):
+                    regions_list.append({
+                        "name": in_name,
+                        "x1": int(in_x1), "y1": int(in_y1),
+                        "x2": int(in_x2), "y2": int(in_y2),
+                        "type": in_type
+                    })
+                    st.session_state[regions_key] = regions_list
+                    st.rerun()
+            
+            # 区域列表
+            st.divider()
+            st.markdown("**📌 已添加的区域**")
+            
+            current_regions = []
+            for i in range(len(regions_list)):
+                region = regions_list[i]
+                name = st.session_state.get(f"{key_prefix}_{i}_name", region["name"])
+                x1 = st.session_state.get(f"{key_prefix}_{i}_x1", region["x1"])
+                y1 = st.session_state.get(f"{key_prefix}_{i}_y1", region["y1"])
+                x2 = st.session_state.get(f"{key_prefix}_{i}_x2", region["x2"])
+                y2 = st.session_state.get(f"{key_prefix}_{i}_y2", region["y2"])
+                rtype = st.session_state.get(f"{key_prefix}_{i}_type", region.get("type", "非选择题"))
+                current_regions.append({"name": name, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "type": rtype})
+            
+            if current_regions:
+                for i, region in enumerate(current_regions):
+                    cols = st.columns([2, 1.5, 1, 1, 1, 1, 1])
+                    with cols[0]:
+                        st.text_input("名称", value=region["name"], key=f"{key_prefix}_{i}_name")
+                    with cols[1]:
+                        st.selectbox("类型", ["非选择题", "选择题", "个人信息"], 
+                                     index=["非选择题", "选择题", "个人信息"].index(region["type"]),
+                                     key=f"{key_prefix}_{i}_type")
+                    with cols[2]:
+                        st.number_input("x1", value=region["x1"], min_value=0, key=f"{key_prefix}_{i}_x1")
+                    with cols[3]:
+                        st.number_input("y1", value=region["y1"], min_value=0, key=f"{key_prefix}_{i}_y1")
+                    with cols[4]:
+                        st.number_input("x2", value=region["x2"], min_value=0, key=f"{key_prefix}_{i}_x2")
+                    with cols[5]:
+                        st.number_input("y2", value=region["y2"], min_value=0, key=f"{key_prefix}_{i}_y2")
+                    with cols[6]:
+                        st.write("")
+                        st.write("")
+                        if st.button("❌", key=f"{key_prefix}_del_{i}"):
+                            regions_list.pop(i)
+                            st.session_state[regions_key] = regions_list
+                            for suffix in ["name", "type", "x1", "y1", "x2", "y2"]:
+                                k = f"{key_prefix}_{i}_{suffix}"
+                                if k in st.session_state:
+                                    del st.session_state[k]
+                            st.rerun()
             else:
-                st.info("请在图片上拖拽画出矩形框")
-        
-        st.divider()
-        st.markdown(f"**📌 当前{ref_choice}已添加的截取区域（可修改名称和坐标）**")
-        
-        def remove_region(idx):
-            regions_list.pop(idx)
-            st.session_state[regions_key] = regions_list
-            for suffix in ["name", "x1", "y1", "x2", "y2"]:
-                k = f"{key_prefix}_{idx}_{suffix}"
-                if k in st.session_state:
-                    del st.session_state[k]
-            st.rerun()
-        
-        # 读取当前区域配置
-        current_regions = []
-        for i in range(len(regions_list)):
-            region = regions_list[i]
-            name = st.session_state.get(f"{key_prefix}_{i}_name", region["name"])
-            x1 = st.session_state.get(f"{key_prefix}_{i}_x1", region["x1"])
-            y1 = st.session_state.get(f"{key_prefix}_{i}_y1", region["y1"])
-            x2 = st.session_state.get(f"{key_prefix}_{i}_x2", region["x2"])
-            y2 = st.session_state.get(f"{key_prefix}_{i}_y2", region["y2"])
-            rtype = st.session_state.get(f"{key_prefix}_{i}_type", region.get("type", "非选择题"))
-            current_regions.append({"name": name, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "type": rtype})
-        
-        if current_regions:
-            for i, region in enumerate(current_regions):
-                cols = st.columns([2, 1.5, 1, 1, 1, 1, 1])
-                with cols[0]:
-                    st.text_input("区域名称", value=region["name"], key=f"{key_prefix}_{i}_name")
-                with cols[1]:
-                    st.selectbox("类型", ["非选择题", "选择题", "个人信息"], 
-                                 index=["非选择题", "选择题", "个人信息"].index(region["type"]),
-                                 key=f"{key_prefix}_{i}_type")
-                with cols[2]:
-                    st.number_input("x1", value=region["x1"], min_value=0, key=f"{key_prefix}_{i}_x1")
-                with cols[3]:
-                    st.number_input("y1", value=region["y1"], min_value=0, key=f"{key_prefix}_{i}_y1")
-                with cols[4]:
-                    st.number_input("x2", value=region["x2"], min_value=0, key=f"{key_prefix}_{i}_x2")
-                with cols[5]:
-                    st.number_input("y2", value=region["y2"], min_value=0, key=f"{key_prefix}_{i}_y2")
-                with cols[6]:
-                    st.write("")
-                    st.write("")
-                    st.button("❌ 删除", key=f"{key_prefix}_del_{i}", on_click=remove_region, args=(i,))
-        else:
-            st.info(f"暂无截取区域，请先在上方{ref_choice}图片中画框添加")
-        
-        # 实时同步回 session_state
-        synced = []
-        for i in range(len(regions_list)):
-            synced.append({
-                "name": st.session_state.get(f"{key_prefix}_{i}_name", regions_list[i]["name"]),
-                "x1": st.session_state.get(f"{key_prefix}_{i}_x1", regions_list[i]["x1"]),
-                "y1": st.session_state.get(f"{key_prefix}_{i}_y1", regions_list[i]["y1"]),
-                "x2": st.session_state.get(f"{key_prefix}_{i}_x2", regions_list[i]["x2"]),
-                "y2": st.session_state.get(f"{key_prefix}_{i}_y2", regions_list[i]["y2"]),
-                "type": st.session_state.get(f"{key_prefix}_{i}_type", regions_list[i].get("type", "非选择题")),
-            })
-        st.session_state[regions_key] = synced
-        
-        # 预览
-        st.write("---")
-        st.markdown(f"**🎨 {ref_choice}截取区域预览**")
-        if synced:
-            vis = ref_img.copy()
-            h, w = vis.shape[:2]
-            type_colors = {
-                "非选择题": (0, 255, 0),    # 绿色
-                "选择题": (255, 0, 0),      # 红色
-                "个人信息": (0, 0, 255),    # 蓝色
-            }
-            for idx, region in enumerate(synced):
-                color = type_colors.get(region["type"], (0,255,0))
-                x1 = max(0, min(w, region["x1"]))
-                y1 = max(0, min(h, region["y1"]))
-                x2 = max(0, min(w, region["x2"]))
-                y2 = max(0, min(h, region["y2"]))
-                cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
-                label = f"{region['name']}({region['type'][:2]})"
-                cv2.putText(vis, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-            st.image(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB), caption=f"{ref_choice}截取区域预览", use_column_width=True)
-        else:
-            st.info("请先添加截取区域")
+                st.caption("暂无区域")
+            
+            # 实时同步
+            synced = []
+            for i in range(len(regions_list)):
+                synced.append({
+                    "name": st.session_state.get(f"{key_prefix}_{i}_name", regions_list[i]["name"]),
+                    "x1": st.session_state.get(f"{key_prefix}_{i}_x1", regions_list[i]["x1"]),
+                    "y1": st.session_state.get(f"{key_prefix}_{i}_y1", regions_list[i]["y1"]),
+                    "x2": st.session_state.get(f"{key_prefix}_{i}_x2", regions_list[i]["x2"]),
+                    "y2": st.session_state.get(f"{key_prefix}_{i}_y2", regions_list[i]["y2"]),
+                    "type": st.session_state.get(f"{key_prefix}_{i}_type", regions_list[i].get("type", "非选择题")),
+                })
+            st.session_state[regions_key] = synced
+            
+            # 预览
+            st.write("---")
+            st.markdown("**🎨 预览**")
+            img_size = st.session_state.get(size_key)
+            if img_size and synced:
+                if ref_img is not None:
+                    vis = ref_img.copy()
+                else:
+                    vis = np.ones((img_size[1], img_size[0], 3), dtype=np.uint8) * 255
+                h, w = vis.shape[:2]
+                type_colors = {
+                    "非选择题": (0, 255, 0),
+                    "选择题": (255, 0, 0),
+                    "个人信息": (0, 0, 255),
+                }
+                for idx, region in enumerate(synced):
+                    color = type_colors.get(region["type"], (0,255,0))
+                    x1 = max(0, min(w, region["x1"]))
+                    y1 = max(0, min(h, region["y1"]))
+                    x2 = max(0, min(w, region["x2"]))
+                    y2 = max(0, min(h, region["y2"]))
+                    cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+                    label = f"{region['name']}({region['type'][:2]})"
+                    cv2.putText(vis, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                st.image(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB), caption=f"{side_label}预览", use_column_width=True)
+            else:
+                st.caption("添加区域后显示预览")
+    
+    col_a, col_b = st.columns(2)
+    render_side(col_a, True, calib_mode)
+    render_side(col_b, False, calib_mode)
     
     # 导出/导入配置
-    if available_refs:
-        col_exp, col_imp = st.columns(2)
-        with col_exp:
-            export_data = {
-                "mode": "manual_regions_v2",
-                "image_size_a": {"w": st.session_state.ref_image_size_a[0], "h": st.session_state.ref_image_size_a[1]} if st.session_state.ref_image_size_a else None,
-                "image_size_b": {"w": st.session_state.ref_image_size_b[0], "h": st.session_state.ref_image_size_b[1]} if st.session_state.ref_image_size_b else None,
-                "regions_a": st.session_state.manual_regions_a,
-                "regions_b": st.session_state.manual_regions_b,
-            }
-            st.download_button(
-                label="📥 导出区域配置(JSON)",
-                data=json.dumps(export_data, ensure_ascii=False, indent=2),
-                file_name="manual_regions.json",
-                mime="application/json"
-            )
-        with col_imp:
-            imported = st.file_uploader("导入区域配置(JSON)", type=["json"], key="import_regions")
-            if imported:
-                try:
-                    data = json.loads(imported.read().decode("utf-8"))
-                    if "regions_a" in data:
-                        st.session_state.manual_regions_a = data["regions_a"]
-                    if "regions_b" in data:
-                        st.session_state.manual_regions_b = data["regions_b"]
-                    # 兼容旧格式
-                    if "regions" in data and "regions_a" not in data:
-                        st.session_state.manual_regions_a = data["regions"]
-                    st.success("✅ 已导入区域配置")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"导入失败: {e}")
+    st.divider()
+    col_exp, col_imp = st.columns(2)
+    with col_exp:
+        export_data = {
+            "mode": "manual_regions_v2",
+            "image_size_a": {"w": st.session_state.ref_image_size_a[0], "h": st.session_state.ref_image_size_a[1]} if st.session_state.ref_image_size_a else None,
+            "image_size_b": {"w": st.session_state.ref_image_size_b[0], "h": st.session_state.ref_image_size_b[1]} if st.session_state.ref_image_size_b else None,
+            "regions_a": st.session_state.manual_regions_a,
+            "regions_b": st.session_state.manual_regions_b,
+        }
+        st.download_button(
+            label="📥 导出区域配置(JSON)",
+            data=json.dumps(export_data, ensure_ascii=False, indent=2),
+            file_name="manual_regions.json",
+            mime="application/json"
+        )
+    with col_imp:
+        imported = st.file_uploader("导入区域配置(JSON)", type=["json"], key="import_regions")
+        if imported:
+            try:
+                data = json.loads(imported.read().decode("utf-8"))
+                if "regions_a" in data:
+                    st.session_state.manual_regions_a = data["regions_a"]
+                if "regions_b" in data:
+                    st.session_state.manual_regions_b = data["regions_b"]
+                # 兼容旧格式
+                if "regions" in data and "regions_a" not in data:
+                    st.session_state.manual_regions_a = data["regions"]
+                st.success("✅ 已导入区域配置")
+                st.rerun()
+            except Exception as e:
+                st.error(f"导入失败: {e}")
     
     st.divider()
     
@@ -420,220 +432,303 @@ with tab1:
     else:
         st.warning("请先加载模板")
     
+    # ===== 选择题版式配置（半自动网格） =====
     st.divider()
+    st.header("4. 选择题版式配置（半自动网格）")
+    st.info("新版式试卷无需逐个点选选项框。在图片上画出每列的大致区域，输入行列数，系统自动生成网格并判断填涂。")
     
-    # ===== 标准答案识别 =====
-    st.header("4. 标准答案识别")
-    st.info("上传一张正确答案已填涂的答题卡A面图片，系统将自动识别标准答案并填充到左侧「标准答案设置」中。"
-            "支持两种识别方式：①使用手动标定的「选择题」区域；②使用模板全局识别。")
+    layout_file = st.file_uploader("上传选择题区域样图（用于配置版式）", type=["jpg","jpeg","png"], key="layout_sample")
     
-    std_img_file = st.file_uploader("上传标准答案答题卡（A面，已填涂正确答案）", type=["jpg","jpeg","png"], key="std_answer_img")
-    if std_img_file and st.session_state.processor:
-        proc = st.session_state.processor
-        bytes_std = np.asarray(bytearray(std_img_file.read()), dtype=np.uint8)
-        std_img = cv2.imdecode(bytes_std, cv2.IMREAD_COLOR)
+    if layout_file:
+        bytes_l = np.asarray(bytearray(layout_file.read()), dtype=np.uint8)
+        layout_img = cv2.imdecode(bytes_l, cv2.IMREAD_COLOR)
+        lh, lw = layout_img.shape[:2]
+        st.write(f"📐 图片尺寸: {lw} × {lh}")
         
-        # 标准答案识别时不使用差分法（避免空白答题卡与标准答案图片对齐偏差导致误判）
-        saved_blank_refs = proc.blank_refs.copy()
-        proc.blank_refs = {}
-        
-        # 允许用户调整识别阈值
-        std_threshold = st.slider("识别阈值（标准答案）", 0.05, 0.50, 0.15, 0.01,
-                                   help="选项框内黑色像素比例超过此阈值即认为已填涂。涂得较黑可用0.15，若识别不全可适当降低，若多涂太多可提高。")
-        
-        # 调试模式：显示每个选项的 fill_ratio
-        show_debug = st.checkbox("显示调试信息（每个选项的识别置信度）", value=False)
-        
-        # 识别标准答案
-        std_result = {}
-        debug_data = {}
-        
-        # 优先使用手动标定的选择题区域
-        manual_choice_regions = [r for r in st.session_state.manual_regions_a if r.get("type") == "选择题"]
-        if manual_choice_regions:
-            st.info(f"检测到 {len(manual_choice_regions)} 个手动标定的选择题区域，使用区域识别模式...")
-            for region in manual_choice_regions:
-                rc = proc.recognize_choices_in_region(std_img, region, "A", threshold=std_threshold, ref_size=st.session_state.ref_image_size_a, debug=show_debug)
-                if show_debug and isinstance(rc, dict) and "answers" in rc:
-                    std_result.update(rc["answers"])
-                    debug_data.update(rc["debug"])
-                else:
-                    std_result.update(rc)
-        else:
-            st.info("未检测到手动标定的选择题区域，使用模板全局识别模式...")
-            rc = proc.recognize_choices(std_img, "A", threshold=std_threshold, debug=show_debug)
-            if show_debug and isinstance(rc, dict) and "answers" in rc:
-                std_result = rc["answers"]
-                debug_data = rc["debug"]
-            else:
-                std_result = rc
-        
-        # 恢复空白参考
-        proc.blank_refs = saved_blank_refs
-        
-        # 过滤有效答案
-        std_clean = {}
-        multi_detected = []
-        empty_detected = []
-        for q, ans in std_result.items():
-            if ans and not str(ans).endswith("(多涂)"):
-                std_clean[q] = ans
-            elif ans and str(ans).endswith("(多涂)"):
-                multi_detected.append(f"Q{q}:{ans}")
-            else:
-                empty_detected.append(f"Q{q}")
-        
-        # 调试信息展示
-        if show_debug and debug_data:
-            st.markdown("**调试数据（每题各选项的 fill_ratio）**")
-            debug_rows = []
-            for q in sorted(debug_data.keys()):
-                ratios = debug_data[q]["ratios"]
-                filled = debug_data[q]["filled"]
-                for opt in sorted(ratios.keys()):
-                    debug_rows.append({
-                        "题号": q,
-                        "选项": opt,
-                        "fill_ratio": f"{ratios[opt]:.3f}",
-                        "是否超过阈值": "✅" if ratios[opt] > std_threshold else "",
-                        "标准答案": "✓" if std_clean.get(q) == opt else ""
-                    })
-            st.dataframe(pd.DataFrame(debug_rows), height=400)
-            st.caption(f"阈值={std_threshold}，fill_ratio > {std_threshold} 的选项会被判定为填涂")
-        
-        if std_clean:
-            st.write(f"识别到 **{len(std_clean)}** 题标准答案，请核对：")
-            
-            metric_cols = st.columns(10)
-            for idx, (q, ans) in enumerate(sorted(std_clean.items())):
-                with metric_cols[idx % 10]:
-                    st.metric(f"Q{q}", ans)
-            
-            if multi_detected:
-                st.warning(f"以下题目检测到多涂（已排除）：{', '.join(multi_detected)}")
-            if empty_detected:
-                st.info(f"以下题目未识别到填涂（共{len(empty_detected)}题）：{', '.join(empty_detected)}")
-            
-            col_confirm, col_cancel = st.columns([1, 3])
-            with col_confirm:
-                if st.button("✅ 确认并设为标准答案", type="primary", key="confirm_std"):
-                    st.session_state.standard_answers = std_clean
-                    st.success(f"已设置 {len(std_clean)} 题标准答案！请到「批量处理」页面上传学生答题卡进行批改。")
-                    st.rerun()
-            
-            # 可视化
-            st.caption("下方为标准答案图片的识别可视化（绿色实心圆=识别为填涂的选项框中心，灰色空心圆=未填涂）：")
-            vis_std = std_img.copy()
-            h, w = vis_std.shape[:2]
-            for b in proc.template["pages"]["A"].get("bubbles", []):
-                bx, by = proc.scale_coords(b["x"], b["y"], w, h)
-                q = b["q"]
-                opt = b["opt"]
-                if std_clean.get(q) == opt:
-                    cv2.circle(vis_std, (bx, by), 8, (0, 255, 0), -1)
-                else:
-                    cv2.circle(vis_std, (bx, by), 4, (200, 200, 200), 1)
-            st.image(cv2.cvtColor(vis_std, cv2.COLOR_BGR2RGB), caption="绿色实心圆=标准答案填涂位置", use_column_width=True)
-        else:
-            st.warning("未识别到有效标准答案，请检查：\n1. 图片是否清晰\n2. 正确答案是否已明显填涂\n3. 尝试调低「识别阈值」")
-
-
-    st.divider()
-    
-    # ===== 自定义选项框标定（绕过模板bubbles）=====
-    st.header("5. 自定义选项框标定（精准模式）")
-    st.info("如果模板自动识别不准确，您可以在此上传标准答案图片，直接在图片上框选每个已填涂的选项框位置。批量处理时将使用您标定的位置进行识别。")
-    
-    custom_img_file = st.file_uploader("上传标准答案图片（用于标定选项框位置）", type=["jpg","jpeg","png"], key="custom_bubble_img")
-    if custom_img_file:
-        bytes_c = np.asarray(bytearray(custom_img_file.read()), dtype=np.uint8)
-        custom_img = cv2.imdecode(bytes_c, cv2.IMREAD_COLOR)
-        h, w = custom_img.shape[:2]
-        st.session_state.custom_bubbles_img_size = (w, h)
-        
-        # Canvas 显示尺寸限制
-        MAX_CANVAS_WIDTH = 700
-        canvas_scale = MAX_CANVAS_WIDTH / w
+        # Canvas 显示尺寸
+        MAX_CANVAS_WIDTH = 800
+        canvas_scale = MAX_CANVAS_WIDTH / lw
         display_w = MAX_CANVAS_WIDTH
-        display_h = int(h * canvas_scale)
+        display_h = int(lh * canvas_scale)
         
-        bg_image = Image.fromarray(cv2.cvtColor(custom_img, cv2.COLOR_BGR2RGB))
+        bg_image = Image.fromarray(cv2.cvtColor(layout_img, cv2.COLOR_BGR2RGB))
         bg_image = bg_image.convert("RGBA")
         bg_image = bg_image.resize((display_w, display_h))
         
-        st.image(bg_image, caption="参考图（若 Canvas 背景黑屏，请根据此图画框）", width=display_w)
+        st.markdown("**🖱️ 在下方图片上拖拽画出各列的矩形区域（从左到右画，红色框）：**")
+        st.caption("画完所有列后，点击「提取画框」；如需重画请点击「清空画布」")
         
-        st.markdown("**🖱️ 在下方图片上，在每个已填涂的选项框中心画小矩形框（红色）：**")
-        st.caption("提示：框不需要很精确，框住选项即可。画完后在下方表格中填写对应的题号和选项。")
-        
-        canvas_ver = st.session_state.get("cb_canvas_version", 0)
+        canvas_ver = st.session_state.get("layout_canvas_ver", 0)
         canvas_result = st_canvas(
-            fill_color="rgba(255, 165, 0, 0.3)",
+            fill_color="rgba(255, 165, 0, 0.2)",
             stroke_width=2,
             stroke_color="#FF0000",
             background_image=bg_image,
             height=display_h,
             width=display_w,
             drawing_mode="rect",
-            key=f"custom_bubble_canvas_{canvas_ver}",
+            key=f"layout_canvas_{canvas_ver}",
             update_streamlit=True,
         )
         
-        if canvas_result.json_data is not None:
+        col_extract, col_clear = st.columns([1, 1])
+        with col_extract:
+            extract_clicked = st.button("➕ 提取画框并配置参数", key="layout_extract")
+        with col_clear:
+            if st.button("🗑️ 清空画布", key="layout_clear_canvas"):
+                st.session_state.layout_canvas_ver = canvas_ver + 1
+                if "layout_draft_boxes" in st.session_state:
+                    del st.session_state.layout_draft_boxes
+                st.rerun()
+        
+        col_rec = st.columns([1])[0]
+        with col_rec:
+            if st.button("✨ 使用推荐框(自动)", key="use_recommended"):
+                st.session_state.layout_draft_boxes = [
+                    {'x1': 50, 'y1': 28, 'x2': 160, 'y2': 132},
+                    {'x1': 240, 'y1': 29, 'x2': 350, 'y2': 135},
+                    {'x1': 430, 'y1': 25, 'x2': 670, 'y2': 138},
+                    {'x1': 50, 'y1': 155, 'x2': 160, 'y2': 264},
+                    {'x1': 240, 'y1': 156, 'x2': 350, 'y2': 266},
+                    {'x1': 430, 'y1': 157, 'x2': 560, 'y2': 262},
+                    {'x1': 50, 'y1': 285, 'x2': 160, 'y2': 392},
+                    {'x1': 240, 'y1': 287, 'x2': 350, 'y2': 394},
+                    {'x1': 430, 'y1': 275, 'x2': 560, 'y2': 340},
+                ]
+                st.rerun()
+        
+        if extract_clicked and canvas_result.json_data is not None:
             rects = [obj for obj in canvas_result.json_data.get("objects", []) if obj.get("type") == "rect"]
             if rects:
-                st.write(f"画布上检测到 **{len(rects)}** 个矩形框")
-                
-                # 转换为实际图片坐标
-                bubble_list = []
-                for idx, obj in enumerate(rects):
-                    cx = int((obj["left"] + obj["width"] / 2) / canvas_scale)
-                    cy = int((obj["top"] + obj["height"] / 2) / canvas_scale)
-                    bubble_list.append({"idx": idx, "x": cx, "y": cy, "w": max(12, int(obj["width"] / canvas_scale)), "h": max(12, int(obj["height"] / canvas_scale))})
-                
-                st.markdown("**请为每个框填写题号和选项：**")
-                st.caption("例如：框对应第1题的答案A，就填 题号=1，选项=A")
-                
-                updated_bubbles = []
-                cols_per_row = 4
-                for i in range(0, len(bubble_list), cols_per_row):
-                    cols = st.columns(cols_per_row)
-                    for j in range(cols_per_row):
-                        idx = i + j
-                        if idx >= len(bubble_list):
-                            break
-                        b = bubble_list[idx]
-                        with cols[j]:
-                            st.write(f"框 {idx+1} (x={b['x']}, y={b['y']})")
-                            q_val = st.number_input(f"题号", min_value=1, max_value=100, value=idx+1, key=f"cb_q_{idx}_{canvas_ver}")
-                            opt_val = st.selectbox(f"选项", ["A","B","C","D","E","F","G"], key=f"cb_opt_{idx}_{canvas_ver}")
-                            updated_bubbles.append({"q": int(q_val), "opt": opt_val, "x": b["x"], "y": b["y"], "w": b["w"], "h": b["h"]})
-                
-                if st.button("💾 保存自定义选项框", type="primary"):
-                    # 按题号去重：同一题保留用户最后设定的
-                    dedup = {}
-                    for b in updated_bubbles:
-                        dedup[b["q"]] = b
-                    st.session_state.custom_bubbles = list(dedup.values())
-                    # 同时自动设为标准答案
-                    std_from_custom = {b["q"]: b["opt"] for b in st.session_state.custom_bubbles}
-                    st.session_state.standard_answers = std_from_custom
-                    st.success(f"已保存 {len(st.session_state.custom_bubbles)} 个自定义选项框，并已设为标准答案！")
-                    st.rerun()
-                
-                if st.button("🗑️ 清空画布重画"):
-                    st.session_state.cb_canvas_version = canvas_ver + 1
-                    st.rerun()
+                box_list = []
+                for obj in rects:
+                    x1 = int(obj["left"] / canvas_scale)
+                    y1 = int(obj["top"] / canvas_scale)
+                    x2 = int((obj["left"] + obj["width"]) / canvas_scale)
+                    y2 = int((obj["top"] + obj["height"]) / canvas_scale)
+                    box_list.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2})
+                # 不再自动排序，保持用户画框的原始顺序（Canvas返回的顺序）
+                # 用户应按 1→2→3... 的视觉顺序依次画框
+                st.session_state.layout_draft_boxes = box_list
+                st.session_state.layout_canvas_ver = canvas_ver + 1
+                st.rerun()
             else:
-                st.info("请在图片上画出矩形框标定已填涂的选项位置")
+                st.warning("请先画出至少一个矩形框")
+        
+        # 已提取的框 → 参数配置
+        if st.session_state.get("layout_draft_boxes"):
+            boxes = st.session_state.layout_draft_boxes
+            st.markdown(f"**✏️ 已提取 {len(boxes)} 个列框，请为每列配置参数：**")
+            
+            # 批量设置工具栏
+            st.markdown("---")
+            st.caption("批量设置工具：先统一设一个默认值，再单独微调个别列")
+            bc1, bc2, bc3, bc4 = st.columns([1,1,1,1])
+            with bc1:
+                batch_q = st.number_input("默认题目数", min_value=1, value=5, key="batch_nq")
+            with bc2:
+                batch_o = st.number_input("默认选项数", min_value=2, value=4, key="batch_no")
+            with bc3:
+                if st.button("应用到全部", key="batch_apply"):
+                    for i in range(len(boxes)):
+                        st.session_state[f"ld_nq_{i}"] = int(batch_q)
+                        st.session_state[f"ld_no_{i}"] = int(batch_o)
+                    st.rerun()
+            with bc4:
+                if st.button("恢复默认", key="batch_reset"):
+                    for i in range(len(boxes)):
+                        st.session_state[f"ld_sq_{i}"] = i*5+1
+                        st.session_state[f"ld_nq_{i}"] = 5
+                        st.session_state[f"ld_no_{i}"] = 3
+                    st.rerun()
+            st.markdown("---")
+            
+            configs = []
+            for i, box in enumerate(boxes):
+                st.markdown(f"**第 {i+1} 列** — 框范围: ({box['x1']},{box['y1']}) ~ ({box['x2']},{box['y2']})")
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    sq = st.number_input("起始题号", min_value=1, value=i*5+1, key=f"ld_sq_{i}")
+                with c2:
+                    nq = st.number_input("题目数", min_value=1, value=5, key=f"ld_nq_{i}")
+                with c3:
+                    no = st.number_input("选项数", min_value=2, value=3, key=f"ld_no_{i}")
+                with c4:
+                    thr = st.number_input("填涂阈值", min_value=0.05, max_value=0.80, value=0.25, step=0.05, key=f"ld_thr_{i}")
+                configs.append({
+                    "start_q": int(sq), "num_q": int(nq), "num_options": int(no),
+                    "threshold": float(thr),
+                    **box
+                })
+            
+            # 先显示配置摘要，方便核对
+            summary = []
+            for cfg in configs:
+                summary.append({
+                    "起始题": cfg["start_q"],
+                    "题数": cfg["num_q"],
+                    "选项数": cfg["num_options"],
+                    "阈值": cfg["threshold"],
+                    "框坐标": f"({cfg['x1']},{cfg['y1']})~({cfg['x2']},{cfg['y2']})"
+                })
+            st.dataframe(summary, hide_index=True)
+            
+            # ===== 实时预览与识别 =====
+            st.markdown("---")
+            st.markdown("**👁️ 实时预览与识别**（修改上方参数后自动更新）")
+            st.caption("每列使用各自独立的填涂阈值，可在上方表格中设置")
+            
+            vis = layout_img.copy()
+            all_bubbles = []
+            for cfg in configs:
+                sx, sy, ex, ey = cfg["x1"], cfg["y1"], cfg["x2"], cfg["y2"]
+                nq, no, sq = cfg["num_q"], cfg["num_options"], cfg["start_q"]
+                cv2.rectangle(vis, (sx, sy), (ex, ey), (255, 0, 0), 2)
+                
+                row_h = (ey - sy) / nq
+                col_w = (ex - sx) / no
+                
+                for qi in range(nq):
+                    qn = sq + qi
+                    cy = int(sy + qi * row_h + row_h / 2)
+                    for oi in range(no):
+                        cx = int(sx + oi * col_w + col_w / 2)
+                        letter = chr(ord('A') + oi)
+                        r = max(3, int(min(col_w, row_h) * 0.35))
+                        cv2.circle(vis, (cx, cy), r, (0, 255, 0), 1)
+                        cv2.putText(vis, letter, (cx + 4, cy + 3),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
+                        all_bubbles.append({
+                            "q": qn, "opt": letter,
+                            "x": cx, "y": cy,
+                            "w": max(8, int(col_w * 0.5)),
+                            "h": max(8, int(row_h * 0.5)),
+                            "threshold": cfg["threshold"]
+                        })
+
+            # 实时测试识别 — 改进版：Otsu + 相对差异 + 多半径 + fallback
+            gray = cv2.cvtColor(layout_img, cv2.COLOR_BGR2GRAY)
+            rec_results = {}
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+            def detect_bubble(bx, by, bw, bh):
+                """固定小半径中心检测 + 暗度评分，过滤印刷圆环"""
+                # 固定用小半径(0.25)，只看气泡正中心，过滤边缘印刷线
+                roi_w = max(4, int(bw * 0.25))
+                roi_h = max(4, int(bh * 0.25))
+                x1 = max(0, bx - roi_w // 2)
+                y1 = max(0, by - roi_h // 2)
+                x2 = min(lw, bx + roi_w // 2)
+                y2 = min(lh, by + roi_h // 2)
+                roi = blurred[y1:y2, x1:x2]
+                if roi.size == 0:
+                    return 0, 255, 999
+                # 用暗度作为主要指标
+                mean_g = float(np.mean(roi))
+                std_g = float(np.std(roi))
+                # 暗度评分：空白气泡中心白(~228)→0分，完全填涂(~140)→1分
+                darkness = max(0, (230 - mean_g) / 90)
+                darkness = min(1.0, darkness)
+                return darkness, mean_g, std_g
+
+            # 第一遍：检测每个选项
+            for b in all_bubbles:
+                q, opt = b["q"], b["opt"]
+                bx, by = b["x"], b["y"]
+                bw = b["w"]
+                bh = b["h"]
+                darkness, mean_gray, std_g = detect_bubble(bx, by, bw, bh)
+                if q not in rec_results:
+                    rec_results[q] = {"filled": [], "darkness": {}, "scores": {}, "stds": {}}
+                rec_results[q]["darkness"][opt] = round(darkness, 3)
+                rec_results[q]["scores"][opt] = round(mean_gray, 1)
+                rec_results[q]["stds"][opt] = round(std_g, 1)
+
+            # 第二遍：判断 — 绝对暗度 + 相对差异
+            # 判断 — 关键要求：
+            # 1. best_score < 200：气泡中心真的变暗了（不是坐标偏离到黑块）
+            # 2. rel_diff > 0.05：该选项明显比其他选项暗
+            # 3. best_score 极低(<100)通常是坐标错误导致，视为无效
+            for q, data in rec_results.items():
+                scores = data["scores"]
+                darkness = data["darkness"]
+                sorted_opts = sorted(scores.items(), key=lambda x: x[1])
+                if len(sorted_opts) >= 2:
+                    best_opt, best_score = sorted_opts[0]
+                    second_score = sorted_opts[1][1]
+                    diff = second_score - best_score
+                    rel_diff = diff / best_score if best_score > 0 else 0
+                    best_darkness = darkness.get(best_opt, 0)
+                    # 绝对暗度门槛：中心必须真的黑（best_score < 200）
+                    # 相对差异门槛：提高到0.05减少误检
+                    # 极低分通常是坐标错误，不接受
+                    if 100 < best_score < 200 and best_darkness > 0.30 and rel_diff > 0.05:
+                        data["filled"] = [best_opt]
+                        data["rel_diff"] = round(rel_diff, 3)
+                    else:
+                        data["filled"] = []
+                elif len(sorted_opts) == 1:
+                    opt = list(scores.keys())[0]
+                    d = darkness[opt]
+                    s = list(scores.values())[0]
+                    if 100 < s < 200 and d > 0.50:
+                        data["filled"] = [opt]
+                    else:
+                        data["filled"] = []
+
+
+            # 预览图：检测到的填涂用红色标记
+            vis_bubbles = vis.copy()
+            detected_per_q = {q: data["filled"] for q, data in rec_results.items()}
+            for b in all_bubbles:
+                qn, opt = b["q"], b["opt"]
+                cx, cy = b["x"], b["y"]
+                r = max(3, int(min(b["w"], b["h"]) * 0.4))
+                is_filled = opt in detected_per_q.get(qn, [])
+                color = (0, 0, 255) if is_filled else (0, 255, 0)  # 红=填涂，绿=未填涂
+                cv2.circle(vis_bubbles, (cx, cy), r, color, -1)
+                cv2.putText(vis_bubbles, opt, (cx + 4, cy + 3),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+            st.image(cv2.cvtColor(vis_bubbles, cv2.COLOR_BGR2RGB),
+                     caption="绿色=未填涂，红色=已检测到填涂（共{}个选项框）".format(len(all_bubbles)), use_column_width=True)
+
+            out_cols = st.columns(3)
+            col_idx = 0
+            for q in sorted(rec_results.keys()):
+                with out_cols[col_idx % 3]:
+                    filled = rec_results[q]["filled"]
+                    scores = rec_results[q]["scores"]
+                    darkness = rec_results[q]["darkness"]
+                    rel_diff = rec_results[q].get("rel_diff", 0)
+                    fs = ", ".join(filled) if filled else "未填涂"
+                    st.write(f"**第 {q} 题**: {fs}")
+                    st.caption("rel={:.3f} | {}".format(
+                        rel_diff,
+                        " | ".join(["{}{:.1f}(d{:.2f})".format(k, scores[k], darkness[k]) for k in sorted(scores.keys())])
+                    ))
+                col_idx += 1
+            
+            # 保存
+            st.divider()
+            name = st.text_input("版式名称（保存后可在批量处理中使用）", value="new_layout", key="layout_name_input")
+            if st.button("💾 保存此版式"):
+                if "paper_layouts" not in st.session_state:
+                    st.session_state.paper_layouts = {}
+                st.session_state.paper_layouts[name] = {
+                    "image_size": {"w": lw, "h": lh},
+                    "configs": configs,
+                    "bubbles": all_bubbles
+                }
+                st.success(f"版式 '{name}' 已保存！共 {len(all_bubbles)} 个选项框。")
     
-    if st.session_state.custom_bubbles:
-        st.write(f"当前已保存 **{len(st.session_state.custom_bubbles)}** 个自定义选项框：")
-        df_cb = pd.DataFrame(st.session_state.custom_bubbles)
-        st.dataframe(df_cb[["q", "opt", "x", "y"]])
-        if st.button("🗑️ 清空自定义选项框"):
-            st.session_state.custom_bubbles = []
-            st.session_state.custom_bubbles_img_size = None
+    # 显示已保存的版式
+    if st.session_state.get("paper_layouts"):
+        st.divider()
+        st.markdown("**📋 已保存的版式：**")
+        for ln, ld in st.session_state.paper_layouts.items():
+            st.write(f"- `{ln}`: {len(ld['bubbles'])} 个选项框，图片尺寸 {ld['image_size']['w']}×{ld['image_size']['h']}")
+        if st.button("🗑️ 清空所有版式"):
+            st.session_state.paper_layouts = {}
             st.rerun()
 
 # ---------- Tab 2: 批量处理 ----------
@@ -708,8 +803,7 @@ with tab2:
                             ref_size_a=st.session_state.ref_image_size_a,
                             manual_regions_b=st.session_state.manual_regions_b,
                             ref_size_b=st.session_state.ref_image_size_b,
-                            custom_bubbles=st.session_state.custom_bubbles,
-                            custom_ref_size=st.session_state.custom_bubbles_img_size,
+                            # custom_bubbles 功能已移除
                         )
                         result["_key"] = key
                         result["_file_a"] = files["A"].name
@@ -932,17 +1026,18 @@ with tab3:
                 choice_data = []
                 corrections = st.session_state.manual_corrections.get(result["student_id"], {})
                 
-                for q in range(1, 46):
+                all_qs = sorted(result["choices"].keys())
+                for q in all_qs:
                     auto_ans = result["choices"].get(q, "")
                     auto_display = auto_ans if auto_ans else "(未识别)"
-                    
+
                     std = st.session_state.standard_answers.get(q, "")
                     detail = result.get("_detail", {}).get(q, {})
-                    
+
                     # 是否已人工修正
                     corrected = corrections.get(q)
                     final_ans = corrected if corrected else (auto_ans.replace("(多涂)", "") if auto_ans else "")
-                    
+
                     status_str = ""
                     if std:
                         if final_ans == std:
@@ -951,7 +1046,7 @@ with tab3:
                             status_str = "⚪"
                         else:
                             status_str = "❌"
-                    
+
                     choice_data.append({
                         "题号": q,
                         "自动识别": auto_display,
@@ -1057,7 +1152,7 @@ with tab3:
                         row["选择题满分"] = len(st.session_state.standard_answers)
                     
                     # 每题答案（优先用人工修正）
-                    for q in range(1, 46):
+                    for q in sorted(r["choices"].keys()):
                         ans = corr.get(q)
                         if not ans:
                             auto = r["choices"].get(q, "")
