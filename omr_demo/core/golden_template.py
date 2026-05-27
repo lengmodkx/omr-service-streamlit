@@ -171,11 +171,18 @@ class GoldenTemplate:
     @staticmethod
     def align(ref_roi: np.ndarray, target_roi: np.ndarray) -> Tuple[np.ndarray, bool]:
         """ECC像素级对齐，返回 (对齐后的ROI, 是否成功)"""
+        if ref_roi is None or ref_roi.size == 0 or target_roi is None or target_roi.size == 0:
+            return target_roi, False
+        
         ref_gray = cv2.cvtColor(ref_roi, cv2.COLOR_BGR2GRAY) if len(ref_roi.shape) == 3 else ref_roi
         tgt_gray = cv2.cvtColor(target_roi, cv2.COLOR_BGR2GRAY) if len(target_roi.shape) == 3 else target_roi
 
         if ref_gray.shape != tgt_gray.shape:
             tgt_gray = cv2.resize(tgt_gray, (ref_gray.shape[1], ref_gray.shape[0]))
+        
+        # 安全检查：图像尺寸必须大于高斯核
+        if ref_gray.shape[0] < 5 or ref_gray.shape[1] < 5:
+            return tgt_gray, False
 
         ref_blur = cv2.GaussianBlur(ref_gray, (5, 5), 0)
         tgt_blur = cv2.GaussianBlur(tgt_gray, (5, 5), 0)
@@ -199,7 +206,30 @@ class GoldenTemplate:
     def recognize(self, target_img: np.ndarray, debug: bool = False) -> Dict:
         """主入口：全局ECC对齐 → 采样 → 判断 → 对比黄金答案。
         设置 debug=True 打印每题的详细采样值，用于诊断识别失败原因。"""
+        # 安全检查：防止零尺寸或无效图像导致 OpenCV 底层崩溃
+        if target_img is None or target_img.size == 0:
+            return {
+                "answers": {},
+                "total": 0,
+                "empty_count": 0,
+                "multi_count": 0,
+                "card_flag": "invalid_image",
+                "debug_lines": ["错误：输入图像为空或解码失败"],
+            }
+        
         gray = cv2.cvtColor(target_img, cv2.COLOR_BGR2GRAY) if len(target_img.shape) == 3 else target_img
+        
+        # 额外安全检查：图像尺寸必须大于高斯核
+        if gray.shape[0] < 5 or gray.shape[1] < 5:
+            return {
+                "answers": {},
+                "total": 0,
+                "empty_count": 0,
+                "multi_count": 0,
+                "card_flag": "invalid_image",
+                "debug_lines": [f"错误：图像尺寸过小 {gray.shape}"],
+            }
+        
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         h, w = gray.shape
 
@@ -261,32 +291,39 @@ class GoldenTemplate:
             best_vs_brightest = sorted_opts[-1][1] - best_val
 
             # 多涂检测：相对（明显低于其他均值）或 绝对（多个极暗）双保险
-            dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 175)
-            abs_dark = sum(1 for v in all_vals if v < 160)  # 处理全体偏暗的极端情况
+            dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 150)
+            abs_dark = sum(1 for v in all_vals if v < 140)  # 处理全体偏暗的极端情况，阈值比relative更严格
+            # 收集所有填涂的选项（用于多选题显示），与上方检测口径一致
+            dark_opts = sorted([o for o, v in sorted_opts if (other_mean - v > 24 and v < 150) or v < 140])
 
             # 防线1: 全部偏亮且接近且最暗项也不暗（且无明显填涂信号）→ 未填涂
             # best_val>210 防止浅填涂（如205）被误判为空题
             if mean_val > 200 and range_val < 30 and best_val > 210 and best_delta < 8:
                 answers[q] = {"answer": None, "status": "empty"}
                 empty_count += 1
-            # 防线2: 两个以上暗 → 多涂（相对检测 + 绝对检测双保险）
-            elif dark_count >= 2 or abs_dark >= 2:
-                answers[q] = {"answer": best_opt, "status": "multi"}
+            # 防线2: 两个以上暗 → 多选（相对检测 + 绝对检测双保险）
+            # gap>30 说明最佳选项明显独占，即使 dark_count>=2 也不判多选
+            # abs_dark 仅在整体偏暗时(mean<130)启用，避免正常亮度下误判
+            elif (dark_count >= 2 and gap <= 30) or (abs_dark >= 2 and gap <= 20 and mean_val < 130):
+                answers[q] = {"answer": "".join(dark_opts) if dark_opts else best_opt, "status": "multi"}
                 multi_count += 1
             # 防线3: best明显暗于其他 → 选中
             elif best_delta > 9 and (gap > 2 or gap_ratio > 0.06 or best_vs_brightest > 15):
                 answers[q] = {"answer": best_opt, "status": "single"}
             # 防线3b: 浅填涂/阴影区域兼容，降低 best_delta 和 best_val 门槛
-            elif best_delta > 6 and gap > 0 and (best_val < 210 or mean_val < 215):
+            elif best_delta > 6 and gap > 1 and (best_val < 210 or mean_val < 215):
                 answers[q] = {"answer": best_opt, "status": "single"}
             # 模糊
             else:
                 answers[q] = {"answer": None, "status": "uncertain"}
 
-            # 与黄金答案对比
+            # 与黄金答案对比（多选题按字符集比较，顺序无关）
             ans = answers[q]["answer"]
             if ans and gold_ans:
-                answers[q]["correct"] = (ans == gold_ans)
+                if answers[q]["status"] == "multi":
+                    answers[q]["correct"] = (set(ans) == set(gold_ans))
+                else:
+                    answers[q]["correct"] = (ans == gold_ans)
             else:
                 answers[q]["correct"] = None
 

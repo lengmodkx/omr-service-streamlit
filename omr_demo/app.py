@@ -36,7 +36,6 @@ def init_state():
         "ref_image_size_a": None,      # A面标定参考图尺寸 (w, h)
         "ref_image_size_b": None,      # B面标定参考图尺寸 (w, h)
         "crop_results": [],            # 手动裁剪结果
-        "process_mode": "模板识别模式",  # 或 "手动区域裁剪模式"
         # 自定义选项框标定（绕过模板bubbles）
         "custom_bubbles": [],           # 用户自定义选项框列表
         "custom_bubbles_img_size": None,  # 标定时图片尺寸 (w, h)
@@ -63,6 +62,14 @@ def init_state():
                 r["type"] = "非选择题"
 
 init_state()
+
+def on_golden_upload():
+    """文件上传回调：将图片存入 session_state，避免 rerun 导致上传文件丢失"""
+    f = st.session_state.get("golden_upload")
+    if f is not None:
+        decoded = cv2.imdecode(np.frombuffer(f.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
+        if decoded is not None:
+            st.session_state.golden_image = decoded
 
 st.title("📄 答题卡智能处理系统 (Demo版)")
 st.caption("流程：上传空白模板 → 标定参考 → 批量处理 → 人工核对 → 导出成绩 | 或：上传参考图 → 手动标定区域 → 批量裁剪")
@@ -115,43 +122,29 @@ with st.sidebar:
 tab_names = ["🖼️ 模板与参考", "📤 批量处理", "📊 结果核对与导出"]
 tab1, tab2, tab3 = st.tabs(tab_names)
 
-# ---------- Tab 1: 模板与空白参考 + 手动标定区域 ----------
+# ---------- Tab 1: 模板与参考 + 手动标定区域 ----------
 with tab1:
-    # ===== 原有的空白参考上传 =====
-    st.header("1. 上传空白答题卡作为识别基准")
-    st.info("差分法需要空白答题卡做对比，请上传未填涂的A面和B面空白答题卡（用于提高OMR识别准确率）")
-    
+    # ===== 手动标定截取区域 =====
+    st.header("1. 手动标定截取区域（用于批量裁剪）")
+    st.info("上传A面/B面答题卡样本图片，在图片上拖拽画框标定需要截取的区域。")
+
     c1, c2 = st.columns(2)
     with c1:
-        blank_a_file = st.file_uploader("A面空白答题卡", type=["jpg","jpeg","png"], key="blank_a_up")
+        blank_a_file = st.file_uploader("A面参考图片", type=["jpg", "jpeg", "png"], key="blank_a_up")
         if blank_a_file:
             bytes_a = np.asarray(bytearray(blank_a_file.read()), dtype=np.uint8)
             st.session_state.blank_a = cv2.imdecode(bytes_a, cv2.IMREAD_COLOR)
-            st.image(cv2.cvtColor(st.session_state.blank_a, cv2.COLOR_BGR2RGB), caption="A面空白模板")
-    
     with c2:
-        blank_b_file = st.file_uploader("B面空白答题卡", type=["jpg","jpeg","png"], key="blank_b_up")
+        blank_b_file = st.file_uploader("B面参考图片", type=["jpg", "jpeg", "png"], key="blank_b_up")
         if blank_b_file:
             bytes_b = np.asarray(bytearray(blank_b_file.read()), dtype=np.uint8)
             st.session_state.blank_b = cv2.imdecode(bytes_b, cv2.IMREAD_COLOR)
-            st.image(cv2.cvtColor(st.session_state.blank_b, cv2.COLOR_BGR2RGB), caption="B面空白模板")
-    
-    if st.session_state.processor and st.session_state.blank_a is not None:
-        if st.button("设置空白参考"):
-            st.session_state.processor.set_blank_ref(st.session_state.blank_a, st.session_state.blank_b)
-            st.success("✅ 空白参考已设置，OMR将使用差分法识别")
-    
-    st.divider()
-    
-    # ===== 手动标定截取区域 =====
-    st.header("2. 手动标定截取区域（用于批量裁剪）")
-    st.info("在A面和B面空白答题卡上直接拖拽画框，标定需要截取的区域。")
 
     has_a = st.session_state.blank_a is not None
     has_b = st.session_state.blank_b is not None
 
     if not has_a and not has_b:
-        st.warning("请先在上方上传A面或B面空白答题卡")
+        st.warning("请先上传A面或B面参考图片")
     else:
         MAX_CANVAS_WIDTH = 500
 
@@ -256,7 +249,7 @@ with tab1:
                         with c[4]:
                             st.number_input("y2", region["y2"], key=f"{kp}_y2_{i}", label_visibility="collapsed")
                         with c[5]:
-                            st.selectbox("", ["非选择题", "选择题", "个人信息"],
+                            st.selectbox("类型", ["非选择题", "选择题", "个人信息"],
                                          index=["非选择题", "选择题", "个人信息"].index(region.get("type", "非选择题")),
                                          key=f"{kp}_tp_{i}", label_visibility="collapsed")
                         # 删除按钮（每行独立）
@@ -326,22 +319,20 @@ with tab1:
     
     # ===== 黄金模板标定 =====
     st.divider()
-    st.header("3. 黄金模板标定")
+    st.header("2. 黄金模板标定")
     st.info("上传一份**正确填涂**的答题卡，画出选择题列区域，系统自动识别答案并保存为黄金模板。后续批量处理时用此模板比对识别。")
 
-    golden_img_file = st.file_uploader("上传正确填涂的答题卡", type=["jpg", "jpeg", "png"], key="golden_upload")
-
-    if golden_img_file:
-        bytes_data = np.asarray(bytearray(golden_img_file.read()), dtype=np.uint8)
-        st.session_state.golden_image = cv2.imdecode(bytes_data, cv2.IMREAD_COLOR)
+    golden_img_file = st.file_uploader(
+        "上传正确填涂的答题卡", type=["jpg", "jpeg", "png"],
+        key="golden_upload", on_change=on_golden_upload)
 
     if st.session_state.golden_image is not None:
         gimg = st.session_state.golden_image
         gh, gw = gimg.shape[:2]
-        st.write(f"图片尺寸: {gw} × {gh}")
+        st.caption(f"图片尺寸: {gw} × {gh}  |  下方画布叠加了该图片作为背景，可直接拖拽画框")
 
         # Canvas 画列框
-        MAX_CANVAS_WIDTH = 700
+        MAX_CANVAS_WIDTH = 750
         g_canvas_scale = MAX_CANVAS_WIDTH / gw
         g_display_w = MAX_CANVAS_WIDTH
         g_display_h = int(gh * g_canvas_scale)
@@ -369,10 +360,15 @@ with tab1:
         col_ext, col_clr = st.columns([1, 1])
         with col_ext:
             if st.button("提取画框", key="golden_extract"):
-                if g_canvas_result.json_data is not None:
-                    rects = [obj for obj in g_canvas_result.json_data.get("objects", [])
+                json_data = g_canvas_result.json_data
+                if json_data is None:
+                    st.warning("未获取到画布数据，请确保已在画布上画了矩形框再点击提取")
+                else:
+                    rects = [obj for obj in json_data.get("objects", [])
                              if obj.get("type") == "rect"]
-                    if rects:
+                    if not rects:
+                        st.warning("未检测到矩形框，请在画布上拖拽画出列框后再点击提取")
+                    else:
                         boxes = []
                         for obj in rects:
                             boxes.append({
@@ -383,6 +379,7 @@ with tab1:
                             })
                         st.session_state.golden_column_boxes = boxes
                         st.session_state.golden_canvas_ver = g_canvas_ver + 1
+                        st.success(f"已提取 {len(boxes)} 个列框")
                         st.rerun()
         with col_clr:
             if st.button("清空画布", key="golden_clear"):
@@ -522,647 +519,382 @@ with tab1:
 # ---------- Tab 2: 批量处理 ----------
 with tab2:
     st.header("批量处理答题卡")
+    st.caption("使用标定的截取区域裁剪图片，并用黄金模板识别选择题答案")
 
-    # 处理模式选择
-    mode = st.radio(
-        "选择处理模式",
-        ["模板识别模式", "手动区域裁剪模式", "黄金模板对比模式"],
-        index={"模板识别模式": 0, "手动区域裁剪模式": 1, "黄金模板对比模式": 2}.get(
-            st.session_state.process_mode, 0),
-        horizontal=True
-    )
-    st.session_state.process_mode = mode
-    
-    if mode == "模板识别模式":
-        # ===== 原有流程 =====
-        if st.session_state.processor is None:
-            st.error("⚠️ 请先加载模板")
-        else:
-            st.info("请同时上传A面和B面图片（文件名需对应，如 `xxx01A.jpg` 和 `xxx01B.jpg`）")
-            uploaded = st.file_uploader("批量上传", type=["jpg","jpeg","png"], accept_multiple_files=True, key="batch_template")
-            
-            if uploaded:
-                # 配对
-                pairs = {}
-                for f in uploaded:
-                    name = f.name.upper()
-                    base = None
-                    side = None
-                    if name.endswith("A.JPG") or name.endswith("A.JPEG") or name.endswith("A.PNG"):
-                        base = f.name[:-5] if name.endswith("A.JPG") else (f.name[:-6] if name.endswith("A.JPEG") else f.name[:-5])
-                        side = "A"
-                    elif name.endswith("B.JPG") or name.endswith("B.JPEG") or name.endswith("B.PNG"):
-                        base = f.name[:-5] if name.endswith("B.JPG") else (f.name[:-6] if name.endswith("B.JPEG") else f.name[:-5])
-                        side = "B"
-                    if base and side:
-                        pairs.setdefault(base, {})[side] = f
-                
-                valid = {k:v for k,v in pairs.items() if "A" in v and "B" in v}
-                st.write(f"识别到 **{len(valid)}** 组有效答题卡（A+B配对）")
-                
-                col_run, col_thresh = st.columns([1,2])
-                with col_thresh:
-                    threshold = st.slider("OMR识别阈值", 0.02, 0.30, 0.10, 0.01, 
-                                          help="差分比例阈值，越低越灵敏（可能误识），越高越严格（可能漏识）")
-                with col_run:
-                    st.write("")
-                    st.write("")
-                    run_btn = st.button("🚀 开始处理", type="primary")
-                
-                if run_btn:
-                    proc = st.session_state.processor
-                    results = []
-                    bar = st.progress(0)
-                    status = st.empty()
-                    
-                    for idx, (key, files) in enumerate(valid.items()):
-                        status.info(f"处理中 [{idx+1}/{len(valid)}]: {key}")
-                        
-                        fa = files["A"]; fa.seek(0)
-                        fb = files["B"]; fb.seek(0)
-                        img_a = cv2.imdecode(np.asarray(bytearray(fa.read()), dtype=np.uint8), cv2.IMREAD_COLOR)
-                        img_b = cv2.imdecode(np.asarray(bytearray(fb.read()), dtype=np.uint8), cv2.IMREAD_COLOR)
-                        
-                        if img_a is None or img_b is None:
-                            continue
-                        
-                        result = proc.process_pair(
-                            img_a, img_b, student_id=key,
-                            manual_regions_a=st.session_state.manual_regions_a,
-                            ref_size_a=st.session_state.ref_image_size_a,
-                            manual_regions_b=st.session_state.manual_regions_b,
-                            ref_size_b=st.session_state.ref_image_size_b,
-                            custom_bubbles=st.session_state.custom_bubbles,
-                            custom_ref_size=st.session_state.custom_bubbles_img_size,
-                        )
-                        result["_key"] = key
-                        result["_file_a"] = files["A"].name
-                        result["_file_b"] = files["B"].name
-                        
-                        # 计分
-                        std = st.session_state.standard_answers
-                        if std:
-                            correct = 0
-                            detail = {}
-                            for q, a in std.items():
-                                sa = result["choices"].get(q, "")
-                                sa_clean = sa.replace("(多涂)", "") if sa else ""
-                                detail[q] = {
-                                    "std": a,
-                                    "ans": sa_clean,
-                                    "raw": sa,
-                                    "ok": sa_clean == a
-                                }
-                                if sa_clean == a:
-                                    correct += 1
-                            result["_score"] = correct
-                            result["_total"] = len(std)
-                            result["_detail"] = detail
-                        else:
-                            result["_score"] = 0
-                            result["_total"] = 0
-                            result["_detail"] = {}
-                        
-                        results.append(result)
-                        bar.progress(int((idx+1)/len(valid)*100))
-                    
-                    status.empty()
-                    bar.empty()
-                    st.session_state.results = results
-                    st.session_state.crop_results = []  # 清空手动裁剪结果
-                    st.success(f"✅ 处理完成！共 {len(results)} 份答题卡")
-                    
-                    # 摘要
-                    if results:
-                        df = pd.DataFrame([{
-                            "学生/文件": r["student_id"],
-                            "条形码": r.get("barcode") or "未识别",
-                            "选择题得分": f"{r.get('_score',0)}/{r.get('_total',0)}" if r.get('_total') else "未设答案",
-                            "已识别": r["choice_count"],
-                            "漏涂": r["empty_count"],
-                            "多涂": r["multi_count"],
-                        } for r in results])
-                        st.dataframe(df)
+    has_a = bool(st.session_state.manual_regions_a)
+    has_b = bool(st.session_state.manual_regions_b)
+    has_golden = st.session_state.golden_template is not None
 
-    elif mode == "黄金模板对比模式":
-        # ===== 黄金模板批量对比 =====
-        if st.session_state.golden_template is None:
-            st.warning("请先在「模板与参考」页面第三步「黄金模板标定」中生成黄金模板")
-        else:
-            st.info("上传待识别的答题卡（A面，需配对B面），系统自动用黄金模板比对识别")
-            uploaded = st.file_uploader("批量上传", type=["jpg", "jpeg", "png"],
-                                         accept_multiple_files=True, key="batch_golden")
-
-            if uploaded:
-                # 配对逻辑
-                pairs = {}
-                for f in uploaded:
-                    name = f.name.upper()
-                    base = None
-                    side = None
-                    if name.endswith("A.JPG") or name.endswith("A.JPEG") or name.endswith("A.PNG"):
-                        base = f.name[:-5] if name.endswith("A.JPG") else (f.name[:-6] if name.endswith("A.JPEG") else f.name[:-5])
-                        side = "A"
-                    elif name.endswith("B.JPG") or name.endswith("B.JPEG") or name.endswith("B.PNG"):
-                        base = f.name[:-5] if name.endswith("B.JPG") else (f.name[:-6] if name.endswith("B.JPEG") else f.name[:-5])
-                        side = "B"
-                    if base and side:
-                        pairs.setdefault(base, {})[side] = f
-
-                valid = {k: v for k, v in pairs.items() if "A" in v and "B" in v}
-                st.write(f"识别到 **{len(valid)}** 组有效答题卡（A+B配对）")
-
-                debug_mode = st.checkbox("调试模式（输出每题详细采样值）", key="debug_golden")
-
-                if st.button("开始黄金模板比对", type="primary"):
-                    gtp = st.session_state.golden_template
-                    results = []
-                    bar = st.progress(0)
-                    status = st.empty()
-
-                    for idx, (key, files) in enumerate(valid.items()):
-                        status.info(f"识别中 [{idx+1}/{len(valid)}]: {key}")
-
-                        fa = files["A"]; fa.seek(0)
-                        fb = files["B"]; fb.seek(0)
-                        img_a = cv2.imdecode(np.asarray(bytearray(fa.read()), dtype=np.uint8), cv2.IMREAD_COLOR)
-                        img_b = cv2.imdecode(np.asarray(bytearray(fb.read()), dtype=np.uint8), cv2.IMREAD_COLOR)
-
-                        if img_a is None:
-                            continue
-
-                        result = gtp.recognize(img_a, debug=debug_mode)
-                        result["_key"] = key
-                        result["_file_a"] = files["A"].name
-                        result["_file_b"] = files["B"].name
-
-                        # 计分（与黄金答案对比）
-                        correct = 0
-                        total_ans = 0
-                        for q, ans in result["answers"].items():
-                            if ans.get("correct") is True:
-                                correct += 1
-                                total_ans += 1
-                            elif ans.get("correct") is False:
-                                total_ans += 1
-
-                        result["_score"] = correct
-                        result["_total"] = total_ans
-
-                        # 主观题（复用原有裁剪）
-                        if img_b is not None:
-                            proc = st.session_state.processor
-                            if proc:
-                                result["subjective"] = proc.crop_subjective(
-                                    img_b, key, "B", os.path.join("output", "subjective"))
-
-                        results.append(result)
-                        bar.progress(int((idx + 1) / len(valid) * 100))
-
-                    status.empty()
-                    bar.empty()
-                    st.session_state.golden_results = results
-                    st.session_state.results = results  # 复用 Tab3 展示
-                    st.success(f"完成！共 {len(results)} 份")
-
-                    if results:
-                        df = pd.DataFrame([{
-                            "学生/文件": r["_key"],
-                            "得分": f"{r.get('_score', 0)}/{r.get('_total', 0)}",
-                            "已作答": r["total"] - r["empty_count"],
-                            "漏涂": r["empty_count"],
-                            "多涂": r["multi_count"],
-                            "异常": r.get("card_flag") or "-",
-                        } for r in results])
-                        st.dataframe(df)
-
+    if not has_a and not has_b:
+        st.warning("请先在「模板与参考」页面标定截取区域")
+    elif not has_golden:
+        st.warning("请先在「模板与参考」页面第三步「黄金模板标定」中生成黄金模板")
     else:
-        # ===== 手动区域裁剪模式 =====
-        st.info("请先在「模板与参考」页面上传空白答题卡并分别标定A面和B面的截取区域。批量处理时会自动配对A+B图片并分别裁剪。")
-        
-        has_a = bool(st.session_state.manual_regions_a)
-        has_b = bool(st.session_state.manual_regions_b)
-        if not has_a and not has_b:
-            st.error("⚠️ 请先标定截取区域（至少标定A面或B面）")
-        else:
-            col_status = st.columns(2)
-            with col_status[0]:
-                if has_a:
-                    st.success(f"✅ A面已配置 {len(st.session_state.manual_regions_a)} 个区域")
-                else:
-                    st.warning("A面未配置区域")
-            with col_status[1]:
-                if has_b:
-                    st.success(f"✅ B面已配置 {len(st.session_state.manual_regions_b)} 个区域")
-                else:
-                    st.warning("B面未配置区域")
-            
-            uploaded = st.file_uploader("上传需要裁剪的答题卡图片（A+B配对）", type=["jpg","jpeg","png"], accept_multiple_files=True, key="batch_crop")
-            
-            if uploaded:
-                # 配对逻辑（与模板模式一致）
-                pairs = {}
-                for f in uploaded:
-                    name = f.name.upper()
-                    base = None
-                    side = None
-                    if name.endswith("A.JPG") or name.endswith("A.JPEG") or name.endswith("A.PNG"):
-                        base = f.name[:-5] if name.endswith("A.JPG") else (f.name[:-6] if name.endswith("A.JPEG") else f.name[:-5])
-                        side = "A"
-                    elif name.endswith("B.JPG") or name.endswith("B.JPEG") or name.endswith("B.PNG"):
-                        base = f.name[:-5] if name.endswith("B.JPG") else (f.name[:-6] if name.endswith("B.JPEG") else f.name[:-5])
-                        side = "B"
-                    if base and side:
-                        pairs.setdefault(base, {})[side] = f
-                
-                valid = {k:v for k,v in pairs.items() if "A" in v and "B" in v}
-                single_a = {k:v for k,v in pairs.items() if "A" in v and "B" not in v}
-                single_b = {k:v for k,v in pairs.items() if "B" in v and "A" not in v}
-                
-                st.write(f"识别到 **{len(valid)}** 组A+B配对，**{len(single_a)}** 张单A面，**{len(single_b)}** 张单B面")
-                
-                if st.button("✂️ 开始批量裁剪", type="primary"):
-                    output_dir = os.path.join("output", "manual_crop")
-                    crop_results = []
-                    
-                    bar = st.progress(0)
-                    status = st.empty()
-                    total = len(valid) + len(single_a) + len(single_b)
-                    processed = 0
-                    
-                    # 处理配对
-                    for key, files in valid.items():
-                        processed += 1
-                        status.info(f"裁剪中 [{processed}/{total}]: {key} (A+B配对)")
-                        
-                        # A面
-                        if has_a:
-                            fa = files["A"]; fa.seek(0)
-                            img_a = cv2.imdecode(np.asarray(bytearray(fa.read()), dtype=np.uint8), cv2.IMREAD_COLOR)
-                            if img_a is not None:
-                                crops_a = CardProcessor.crop_by_regions(
-                                    img_a, st.session_state.manual_regions_a, 
-                                    output_dir, f"{key}_A",
-                                    ref_size=st.session_state.ref_image_size_a
-                                )
-                                crop_results.append({
-                                    "file": files["A"].name, "side": "A", "key": key, "crops": crops_a
-                                })
-                        
-                        # B面
-                        if has_b:
-                            fb = files["B"]; fb.seek(0)
-                            img_b = cv2.imdecode(np.asarray(bytearray(fb.read()), dtype=np.uint8), cv2.IMREAD_COLOR)
-                            if img_b is not None:
-                                crops_b = CardProcessor.crop_by_regions(
-                                    img_b, st.session_state.manual_regions_b, 
-                                    output_dir, f"{key}_B",
-                                    ref_size=st.session_state.ref_image_size_b
-                                )
-                                crop_results.append({
-                                    "file": files["B"].name, "side": "B", "key": key, "crops": crops_b
-                                })
-                        
-                        bar.progress(int(processed/total*100))
-                    
-                    # 处理单A面
-                    for key, files in single_a.items():
-                        processed += 1
-                        status.info(f"裁剪中 [{processed}/{total}]: {key} (单A面)")
-                        if has_a:
-                            fa = files["A"]; fa.seek(0)
-                            img_a = cv2.imdecode(np.asarray(bytearray(fa.read()), dtype=np.uint8), cv2.IMREAD_COLOR)
-                            if img_a is not None:
-                                crops_a = CardProcessor.crop_by_regions(
-                                    img_a, st.session_state.manual_regions_a, 
-                                    output_dir, f"{key}_A",
-                                    ref_size=st.session_state.ref_image_size_a
-                                )
-                                crop_results.append({
-                                    "file": files["A"].name, "side": "A", "key": key, "crops": crops_a
-                                })
-                        bar.progress(int(processed/total*100))
-                    
-                    # 处理单B面
-                    for key, files in single_b.items():
-                        processed += 1
-                        status.info(f"裁剪中 [{processed}/{total}]: {key} (单B面)")
-                        if has_b:
-                            fb = files["B"]; fb.seek(0)
-                            img_b = cv2.imdecode(np.asarray(bytearray(fb.read()), dtype=np.uint8), cv2.IMREAD_COLOR)
-                            if img_b is not None:
-                                crops_b = CardProcessor.crop_by_regions(
-                                    img_b, st.session_state.manual_regions_b, 
-                                    output_dir, f"{key}_B",
-                                    ref_size=st.session_state.ref_image_size_b
-                                )
-                                crop_results.append({
-                                    "file": files["B"].name, "side": "B", "key": key, "crops": crops_b
-                                })
-                        bar.progress(int(processed/total*100))
-                    
-                    status.empty()
-                    bar.empty()
-                    st.session_state.crop_results = crop_results
-                    st.session_state.results = []  # 清空模板识别结果
-                    st.success(f"✅ 裁剪完成！共处理 {total} 份文件")
-                    
-                    # 摘要表格
-                    if crop_results:
-                        summary = []
-                        for cr in crop_results:
-                            for c in cr["crops"]:
-                                summary.append({
-                                    "原图": cr["file"],
-                                    "面别": cr["side"],
-                                    "区域名称": c["name"],
-                                    "裁剪尺寸": f"{c['x2']-c['x1']}×{c['y2']-c['y1']}",
-                                    "保存路径": c["path"]
-                                })
-                        st.dataframe(pd.DataFrame(summary))
+        col_status = st.columns(3)
+        with col_status[0]:
+            st.success(f"A面 {len(st.session_state.manual_regions_a)} 个区域")
+        with col_status[1]:
+            st.success(f"B面 {len(st.session_state.manual_regions_b)} 个区域")
+        with col_status[2]:
+            st.success(f"黄金模板 {len(st.session_state.golden_answers)} 题答案")
+
+        uploaded = st.file_uploader("上传答题卡图片（A+B配对，文件名需对应如 `xxx01A.jpg` / `xxx01B.jpg`）",
+                                    type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="batch_unified")
+
+        if uploaded:
+            pairs = {}
+            for f in uploaded:
+                name = f.name.upper()
+                base = None
+                side = None
+                if name.endswith("A.JPG") or name.endswith("A.JPEG") or name.endswith("A.PNG"):
+                    base = f.name[:-5] if name.endswith("A.JPG") else (f.name[:-6] if name.endswith("A.JPEG") else f.name[:-5])
+                    side = "A"
+                elif name.endswith("B.JPG") or name.endswith("B.JPEG") or name.endswith("B.PNG"):
+                    base = f.name[:-5] if name.endswith("B.JPG") else (f.name[:-6] if name.endswith("B.JPEG") else f.name[:-5])
+                    side = "B"
+                if base and side:
+                    pairs.setdefault(base, {})[side] = f
+
+            valid = {k: v for k, v in pairs.items() if "A" in v and "B" in v}
+            single_a = {k: v for k, v in pairs.items() if "A" in v and "B" not in v}
+            single_b = {k: v for k, v in pairs.items() if "B" in v and "A" not in v}
+            st.write(f"识别到 **{len(valid)}** 组A+B配对，**{len(single_a)}** 张单A面，**{len(single_b)}** 张单B面")
+
+            debug_mode = st.checkbox("调试模式（输出每题详细采样值）", key="debug_unified")
+
+            if st.button("开始处理", type="primary"):
+                gtp = st.session_state.golden_template
+                output_dir = os.path.join("output", "batch")
+                results = []
+                crop_summary = []
+
+                bar = st.progress(0)
+                status = st.empty()
+                total = len(valid) + len(single_a) + len(single_b)
+                processed = [0]  # 用列表包装，避免 nonlocal 问题
+
+                def _process_single(key, file_a, file_b):
+                    processed[0] += 1
+                    status.info(f"处理中 [{processed[0]}/{total}]: {key}")
+
+                    fa = file_a; fa.seek(0)
+                    img_a = cv2.imdecode(np.frombuffer(fa.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if img_a is None:
+                        return None
+
+                    # 1. 黄金模板识别选择题（A面）
+                    r = gtp.recognize(img_a, debug=debug_mode)
+                    r["_key"] = key
+                    r["_file_a"] = file_a.name
+                    r["_file_b"] = file_b.name if file_b else ""
+
+                    # 1b. 生成识别预览图（气泡采样点叠加在原图上）
+                    os.makedirs(output_dir, exist_ok=True)
+                    preview = img_a.copy()
+                    h_p, w_p = preview.shape[:2]
+                    gt_img = gtp.image
+                    gt_h, gt_w = gt_img.shape[:2]
+                    for b in gtp.bubbles:
+                        q, opt = b["q"], b["opt"]
+                        # 坐标从黄金模板尺寸缩放到实际图像尺寸
+                        sx = int(b["x"] * w_p / gt_w)
+                        sy = int(b["y"] * h_p / gt_h)
+                        ans_info = r["answers"].get(q, {})
+                        sts = ans_info.get("status", "uncertain")
+                        detected = ans_info.get("answer", "")
+                        is_detected = (opt in detected) if detected else False
+                        if is_detected and sts == "multi":
+                            color = (255, 0, 0)  # 蓝色
+                        elif is_detected:
+                            color = (0, 200, 0)  # 绿色
+                        else:
+                            color = (180, 180, 180)  # 灰色
+                        cv2.circle(preview, (sx, sy), 6, color, 2 if is_detected else 1)
+                    preview_path = os.path.join(output_dir, f"{key}_golden_preview.png")
+                    _, png_buf = cv2.imencode(".png", preview)
+                    with open(preview_path, "wb") as pf:
+                        pf.write(png_buf)
+                    r["_preview_path"] = preview_path
+
+                    # 2. 计分（与黄金答案对比）
+                    correct = 0
+                    total_q = r["total"]
+                    for ans in r["answers"].values():
+                        if ans.get("correct") is True:
+                            correct += 1
+                    r["_score"] = correct
+                    r["_total"] = total_q
+
+                    # 白卷检测：识别率低于50%
+                    total_q = r["total"]
+                    answered = total_q - r["empty_count"]
+                    rate = answered / total_q * 100 if total_q > 0 else 0
+                    r["_is_blank"] = rate < 50
+                    if r["_is_blank"]:
+                        r["_score"] = 0
+
+                    # 3. 截取区域裁剪（A面）
+                    if has_a:
+                        crops_a = CardProcessor.crop_by_regions(
+                            img_a, st.session_state.manual_regions_a,
+                            output_dir, f"{key}_A",
+                            ref_size=st.session_state.ref_image_size_a)
+                        for c in crops_a:
+                            crop_summary.append({"key": key, "文件": file_a.name, "面别": "A", "区域": c["name"], "路径": c["path"]})
+
+                    # 4. 截取区域裁剪（B面）
+                    if file_b is not None and has_b:
+                        fb = file_b; fb.seek(0)
+                        img_b = cv2.imdecode(np.frombuffer(fb.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if img_b is not None:
+                            crops_b = CardProcessor.crop_by_regions(
+                                img_b, st.session_state.manual_regions_b,
+                                output_dir, f"{key}_B",
+                                ref_size=st.session_state.ref_image_size_b)
+                            for c in crops_b:
+                                crop_summary.append({"key": key, "文件": file_b.name, "面别": "B", "区域": c["name"], "路径": c["path"]})
+
+                    return r
+
+                # 处理A+B配对
+                for key, files in valid.items():
+                    r = _process_single(key, files["A"], files["B"])
+                    if r:
+                        results.append(r)
+                    bar.progress(int(processed[0] / total * 100))
+
+                # 处理单A面
+                for key, files in single_a.items():
+                    r = _process_single(key, files["A"], None)
+                    if r:
+                        results.append(r)
+                    bar.progress(int(processed[0] / total * 100))
+
+                # 处理单B面（仅裁剪，无选择题识别）
+                for key, files in single_b.items():
+                    processed[0] += 1
+                    status.info(f"处理中 [{processed[0]}/{total}]: {key} (仅B面裁剪)")
+                    fb = files["B"]; fb.seek(0)
+                    img_b = cv2.imdecode(np.frombuffer(fb.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if img_b is not None and has_b:
+                        crops_b = CardProcessor.crop_by_regions(
+                            img_b, st.session_state.manual_regions_b,
+                            output_dir, f"{key}_B",
+                            ref_size=st.session_state.ref_image_size_b)
+                        for c in crops_b:
+                            crop_summary.append({"key": key, "文件": files["B"].name, "面别": "B", "区域": c["name"], "路径": c["path"]})
+                    bar.progress(int(processed[0] / total * 100))
+
+                status.empty()
+                bar.empty()
+                st.session_state.results = results
+                st.session_state.crop_results = crop_summary
+                total_crops = len(crop_summary)
+                st.success(f"处理完成！共 {len(results)} 份识别结果，{total_crops} 个裁剪区域")
+
+                if total_crops == 0 and (has_a or has_b):
+                    st.warning("未生成任何裁剪区域，请检查「模板与参考」页面的截取区域是否正确配置")
+
+                # 摘要
+                if results:
+                    rows = []
+                    for r in results:
+                        total_q = r["total"]
+                        answered = total_q - r["empty_count"]
+                        rate = answered / total_q * 100 if total_q > 0 else 0
+                        is_blank = rate < 50
+                        rows.append({
+                            "学生/文件": r["_key"],
+                            "识别题数": f"{answered}/{total_q}",
+                            "识别率": f"{rate:.0f}%",
+                            "状态": "白卷" if is_blank else "正常",
+                            "得分": f"{r.get('_score', 0)}/{r.get('_total', 0)}",
+                            "漏涂": r["empty_count"],
+                            "多选": r["multi_count"],
+                        })
+                    df = pd.DataFrame(rows)
+                    st.dataframe(df)
+
+                    blank_count = sum(1 for row in rows if row["状态"] == "白卷")
+                    if blank_count > 0:
+                        st.warning(f"检测到 {blank_count} 份白卷（识别率低于50%），已自动标记")
+
+                if crop_summary:
+                    with st.expander(f"裁剪详情（{len(crop_summary)} 个区域）"):
+                        st.dataframe(pd.DataFrame(crop_summary))
 
 # ---------- Tab 3: 结果核对与导出 ----------
 with tab3:
     st.header("结果核对与导出")
-    
-    if st.session_state.process_mode in ("模板识别模式", "黄金模板对比模式"):
-        # ===== 模板识别 / 黄金模板对比 结果展示 =====
-        if not st.session_state.results:
-            st.info("请先在「批量处理」页面上传并处理答题卡")
-        else:
+
+    if not st.session_state.results and not st.session_state.crop_results:
+        st.info("请先在「批量处理」页面上传并处理答题卡")
+    else:
+        # ===== 选择题识别结果 =====
+        if st.session_state.results:
             results = st.session_state.results
-
-            is_golden = st.session_state.process_mode == "黄金模板对比模式"
-
-            # 选择学生
-            if is_golden:
-                options = [f"{r['_key']} ({r['_file_a']})" for r in results]
-            else:
-                options = [f"{r['student_id']} ({r['_file_a']})" for r in results]
+            options = [f"{r['_key']} ({r['_file_a']})" for r in results]
             sel_label = st.selectbox("选择答题卡查看详情", options)
             sel_idx = options.index(sel_label)
             result = results[sel_idx]
-            
-            if is_golden:
-                student_label = result["_key"]
-            else:
-                student_label = result.get("student_id", result.get("_key", "unknown"))
-            st.subheader(f"📋 {student_label} - 识别详情")
+            sid = result["_key"]
+            blank_tag = " [白卷]" if result.get("_is_blank") else ""
+            st.subheader(f"📋 {sid}{blank_tag} - 识别详情")
+            if result.get("_is_blank"):
+                st.warning("该试卷识别率低于50%，判定为白卷，得分已置为0")
 
-            # 显示调试信息
+            # 黄金模板识别预览图
+            preview_path = result.get("_preview_path")
+            if preview_path and os.path.exists(preview_path):
+                with st.expander("🔍 黄金模板识别预览（绿色=已识别选项，灰色=未识别，蓝色=多选）", expanded=False):
+                    st.image(preview_path, use_column_width=True)
+
+            # 调试信息
             debug_lines = result.get("debug_lines", [])
             if debug_lines:
                 with st.expander(f"调试信息：{len(debug_lines)} 题未识别", expanded=True):
                     st.code("\n".join(debug_lines), language=None)
 
-            c_left, c_right = st.columns([3, 2])
+            st.markdown("**选择题识别结果（可人工修正）**")
+            corrections = st.session_state.manual_corrections.get(sid, {})
+            all_qs = sorted(result["answers"].keys())
 
-            with c_left:
-                st.markdown("**选择题识别结果（可人工修正）**")
+            choice_data = []
+            for q in all_qs:
+                ans_info = result["answers"].get(q, {})
+                auto_ans = ans_info.get("answer", "")
+                auto_display = auto_ans if auto_ans else "(未识别)"
+                if ans_info.get("status") == "multi":
+                    auto_display += "(多选)"
+                std = st.session_state.golden_answers.get(q, "")
+                corrected = corrections.get(q)
 
-                choice_data = []
-                sid = result.get("student_id", result.get("_key", "unknown"))
-                corrections = st.session_state.manual_corrections.get(sid, {})
-
-                if is_golden:
-                    # 黄金模板格式: result["answers"] = {q: {answer, status, correct}}
-                    all_qs = sorted(result["answers"].keys())
+                corr = ans_info.get("correct")
+                if corr is True:
+                    status_str = "✅"
+                elif corr is False:
+                    status_str = "❌"
+                elif not auto_ans:
+                    status_str = "⚪"
                 else:
-                    all_qs = sorted(result["choices"].keys())
-
-                for q in all_qs:
-                    if is_golden:
-                        ans_info = result["answers"].get(q, {})
-                        auto_ans = ans_info.get("answer", "")
-                        auto_display = auto_ans if auto_ans else "(未识别)"
-                        status_val = ans_info.get("status", "")
-                        if status_val == "multi":
-                            auto_display += "(多涂)"
-                        std = st.session_state.golden_answers.get(q, "")
-                    else:
-                        auto_ans = result["choices"].get(q, "")
-                        auto_display = auto_ans if auto_ans else "(未识别)"
-                        std = st.session_state.standard_answers.get(q, "")
-
-                    corrected = corrections.get(q)
-                    final_ans = corrected if corrected else (auto_ans.replace("(多涂)", "") if auto_ans else "")
-
                     status_str = ""
-                    if is_golden:
-                        corr = ans_info.get("correct")
-                        if corr is True:
-                            status_str = "✅"
-                        elif corr is False:
-                            status_str = "❌"
-                        elif auto_ans is None:
-                            status_str = "⚪"
-                    elif std:
-                        if final_ans == std:
-                            status_str = "✅"
-                        elif not final_ans:
-                            status_str = "⚪"
-                        else:
-                            status_str = "❌"
 
-                    choice_data.append({
-                        "题号": q,
-                        "自动识别": auto_display,
-                        "人工修正": corrected if corrected else "",
-                        "标准答案": std,
-                        "状态": status_str,
-                        "_q": q
-                    })
-                
-                df_choice = pd.DataFrame(choice_data)
-                
-                # 使用data_editor让用户直接修改
-                edited = st.data_editor(
-                    df_choice[["题号", "自动识别", "人工修正", "标准答案", "状态"]],
-                    column_config={
-                        "人工修正": st.column_config.TextColumn("人工修正", help="如需修正，直接输入A/B/C/D等"),
-                    },
-                    hide_index=True,
-                    height=500
-                )
-                
-                # 保存修正
-                new_corr = {}
-                for _, row in edited.iterrows():
-                    if row["人工修正"] and row["人工修正"].strip():
-                        new_corr[int(row["题号"])] = row["人工修正"].strip().upper()
-                st.session_state.manual_corrections[sid] = new_corr
+                choice_data.append({
+                    "题号": q,
+                    "自动识别": auto_display,
+                    "人工修正": corrected if corrected else "",
+                    "标准答案": std,
+                    "状态": status_str,
+                    "_q": q
+                })
 
-                # 计算最终得分
-                if is_golden:
-                    sc = result.get("_score", 0)
-                    tot = result.get("_total", 0)
-                    st.metric("选择题最终得分", f"{sc} / {tot}")
-                elif st.session_state.standard_answers:
-                    final_score = 0
-                    for q, std_ans in st.session_state.standard_answers.items():
-                        corr = new_corr.get(q)
-                        if corr:
-                            if corr == std_ans:
-                                final_score += 1
-                        else:
-                            auto = result["choices"].get(q, "")
-                            if auto and auto.replace("(多涂)", "") == std_ans:
-                                final_score += 1
-                    st.metric("选择题最终得分", f"{final_score} / {len(st.session_state.standard_answers)}")
-            
-            with c_right:
-                # 手动标定区域截图（所有类型都展示）
-                manual_crops = result.get("manual_crops", [])
-                if manual_crops:
-                    st.markdown("**手动标定区域截图**")
-                    type_order = ["选择题", "个人信息", "非选择题"]
-                    type_labels = {"选择题": "📝 选择题区域", "个人信息": "🆔 个人信息区域", "非选择题": "✏️ 非选择题区域"}
-                    for rtype in type_order:
-                        crops_of_type = [c for c in manual_crops if c.get("type") == rtype]
-                        if crops_of_type:
-                            st.markdown(f"*{type_labels.get(rtype, rtype)}*")
-                            cols = st.columns(min(2, len(crops_of_type)))
-                            for idx, crop in enumerate(crops_of_type):
-                                with cols[idx % len(cols)]:
-                                    if Path(crop["path"]).exists():
-                                        st.image(Image.open(crop["path"]),
-                                                caption=f"{crop['region_name']} ({crop['side']}面)",
-                                                use_column_width=True)
-                                    else:
-                                        st.warning(f"{crop['region_name']} 未找到")
-                    st.divider()
-                
-                st.markdown("**主观题切分图片**")
-                for subj in result.get("subjective", []):
-                    qn = subj["q"]
-                    path = subj["path"]
-                    if Path(path).exists():
-                        img = Image.open(path)
-                        st.image(img, caption=f"{qn} (满分{subj['score']}分)", use_column_width=True)
-                    else:
-                        st.warning(f"{qn} 图片未找到")
-                        with st.expander("调试信息"):
-                            st.code(f"path: {path}\nexists: {Path(path).exists()}")
-            
+            edited = st.data_editor(
+                pd.DataFrame(choice_data)[["题号", "自动识别", "人工修正", "标准答案", "状态"]],
+                column_config={
+                    "人工修正": st.column_config.TextColumn("人工修正", help="如需修正，直接输入A/B/C/D等"),
+                },
+                hide_index=True,
+                height=500,
+                key="golden_result_editor",
+            )
+
+            new_corr = {}
+            for _, row in edited.iterrows():
+                if row["人工修正"] and row["人工修正"].strip():
+                    new_corr[int(row["题号"])] = row["人工修正"].strip().upper()
+            st.session_state.manual_corrections[sid] = new_corr
+
+            # 基于人工修正重新计分
+            golden_ans = st.session_state.golden_answers
+            sc = 0
+            tot = len(golden_ans)
+            for q, std_ans in golden_ans.items():
+                final_ans = new_corr.get(q)  # 人工修正优先
+                if not final_ans:
+                    ans_info = result["answers"].get(q, {})
+                    raw = ans_info.get("answer")
+                    final_ans = raw if raw else ""
+                if final_ans:
+                    if len(std_ans) > 1:
+                        # 多选题按字符集比较
+                        if set(final_ans) == set(std_ans):
+                            sc += 1
+                    elif final_ans == std_ans:
+                        sc += 1
+            st.metric("选择题最终得分", f"{sc} / {tot}")
+
             # 全局导出
             st.divider()
             st.subheader("📥 批量导出")
-            
             if st.button("生成Excel成绩单"):
                 export_rows = []
                 for r in results:
-                    if is_golden:
-                        sid = r.get("_key", "unknown")
-                    else:
-                        sid = r.get("student_id", r.get("_key", "unknown"))
-                    corr = st.session_state.manual_corrections.get(sid, {})
-                    
-                    row = {
-                        "学生ID": sid,
-                        "条形码": r.get("barcode", ""),
-                    }
-                    
-                    if is_golden:
-                        row["选择题得分"] = r.get("_score", 0)
-                        row["选择题满分"] = r.get("_total", 0)
-                        row["异常标记"] = r.get("card_flag") or ""
-                        answer_keys = sorted(r["answers"].keys())
-                    else:
-                        if st.session_state.standard_answers:
-                            score = 0
-                            for q, sa in st.session_state.standard_answers.items():
-                                ans = corr.get(q)
-                                if not ans:
-                                    auto = r["choices"].get(q, "")
-                                    ans = auto.replace("(多涂)", "") if auto else ""
-                                if ans == sa:
-                                    score += 1
-                            row["选择题得分"] = score
-                            row["选择题满分"] = len(st.session_state.standard_answers)
-                        answer_keys = sorted(r["choices"].keys())
-                    
-                    # 每题答案
-                    for q in answer_keys:
-                        ans = corr.get(q)
+                    sid_r = r.get("_key", "unknown")
+                    corr_r = st.session_state.manual_corrections.get(sid_r, {})
+                    row = {"学生ID": sid_r, "条形码": r.get("barcode", ""),
+                           "选择题得分": r.get("_score", 0), "选择题满分": r.get("_total", 0),
+                           "白卷": "是" if r.get("_is_blank") else "否",
+                           "异常标记": r.get("card_flag") or ""}
+                    for q in sorted(r["answers"].keys()):
+                        ans = corr_r.get(q)
                         if not ans:
-                            if is_golden:
-                                ans_info = r["answers"].get(q, {})
-                                ans = ans_info.get("answer", "") or ""
-                            else:
-                                auto = r["choices"].get(q, "")
-                                ans = auto if auto else ""
+                            ans_info = r["answers"].get(q, {})
+                            ans = ans_info.get("answer", "") or ""
                         row[f"Q{q}"] = ans
-                    
                     export_rows.append(row)
-                
+
                 df_export = pd.DataFrame(export_rows)
                 buf = io.BytesIO()
                 df_export.to_excel(buf, index=False, engine="openpyxl")
                 buf.seek(0)
-                
                 st.download_button(
                     label="⬇️ 下载Excel成绩单",
                     data=buf,
                     file_name="答题卡成绩汇总.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-                
                 st.dataframe(df_export.head(20))
-    
-    else:
-        # ===== 手动区域裁剪结果展示 =====
-        if not st.session_state.crop_results:
-            st.info("请先在「批量处理」页面选择「手动区域裁剪模式」并上传图片进行裁剪")
-        else:
-            crop_results = st.session_state.crop_results
-            
-            # 按 key 分组（A+B配对）
-            from collections import defaultdict
-            groups = defaultdict(list)
-            for cr in crop_results:
-                groups[cr.get("key", cr["file"])].append(cr)
-            
-            sel_key = st.selectbox("选择答题卡查看裁剪结果", sorted(groups.keys()))
-            group_items = groups[sel_key]
-            
-            st.subheader(f"📁 {sel_key} - 裁剪结果")
-            
-            # 分别展示A面和B面
-            for item in group_items:
-                side = item["side"]
-                st.markdown(f"**{side}面 - {item['file']}**")
-                cols = st.columns(3)
-                for idx, crop in enumerate(item["crops"]):
-                    with cols[idx % 3]:
-                        if Path(crop["path"]).exists():
-                            img = Image.open(crop["path"])
-                            st.image(img, caption=crop["name"], use_column_width=True)
-                        else:
-                            st.warning(f"{crop['name']} 未找到")
-            
-            # 全局汇总
+
+        # ===== 裁剪结果 =====
+        if st.session_state.crop_results:
             st.divider()
-            st.subheader("📥 批量导出")
-            
-            all_summary = []
-            for cr in crop_results:
-                for c in cr["crops"]:
-                    all_summary.append({
-                        "原图": cr["file"],
-                        "面别": cr["side"],
-                        "区域名称": c["name"],
-                        "裁剪路径": c["path"]
-                    })
-            
-            if all_summary:
-                df_all = pd.DataFrame(all_summary)
-                st.dataframe(df_all)
-                
-                csv_buf = io.StringIO()
-                df_all.to_csv(csv_buf, index=False, encoding="utf-8-sig")
-                st.download_button(
-                    label="⬇️ 下载裁剪汇总表(CSV)",
-                    data=csv_buf.getvalue().encode("utf-8-sig"),
-                    file_name="裁剪汇总.csv",
-                    mime="text/csv"
-                )
+            st.subheader("📁 截取区域裁剪结果")
+            cr = st.session_state.crop_results
+            if isinstance(cr, list) and cr:
+                if isinstance(cr[0], dict) and "文件" in cr[0]:
+                    # 新格式（统一处理产生）：按学生分组展示裁剪图片
+                    from collections import defaultdict
+                    groups = defaultdict(lambda: defaultdict(list))
+                    for row in cr:
+                        groups[row.get("key", "unknown")][row["面别"]].append(row)
+                    sel_key = st.selectbox("选择答题卡查看裁剪图片", sorted(groups.keys()))
+                    for side in ["A", "B"]:
+                        side_items = groups[sel_key].get(side, [])
+                        if side_items:
+                            st.markdown(f"**{side}面**")
+                            cols = st.columns(3)
+                            for idx, item in enumerate(side_items):
+                                with cols[idx % 3]:
+                                    if Path(item["路径"]).exists():
+                                        st.image(Image.open(item["路径"]),
+                                                 caption=f"{item['区域']} ({item['面别']}面)",
+                                                 use_column_width=True)
+                                    else:
+                                        st.warning(f"{item['区域']}: 文件未找到")
+                elif isinstance(cr[0], dict) and "crops" in cr[0]:
+                    # 旧格式兼容
+                    from collections import defaultdict
+                    groups = defaultdict(list)
+                    for item in cr:
+                        groups[item.get("key", item["file"])].append(item)
+                    sel_key = st.selectbox("选择答题卡查看裁剪图片", sorted(groups.keys()))
+                    for item in groups[sel_key]:
+                        st.markdown(f"**{item['side']}面 - {item['file']}**")
+                        cols = st.columns(3)
+                        for idx, crop in enumerate(item["crops"]):
+                            with cols[idx % 3]:
+                                if Path(crop["path"]).exists():
+                                    st.image(Image.open(crop["path"]), caption=crop["name"], use_column_width=True)
+                                else:
+                                    st.warning(f"{crop['name']}: 文件未找到")
