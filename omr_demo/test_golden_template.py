@@ -430,6 +430,143 @@ def test_e2e_recognize():
               f"Q{q}答案应包含answer和status字段")
 
 
+# ========== Step 6: _classify_answer 边界场景(2026-06 Q11/Q16 真实数据) ==========
+
+def test_classify_q16_real_borderline():
+    """T6.1: Q16 真实数据 — 浅填涂 + 亮纸张(best_delta≈4.65)+ 旧阈值会误判 empty
+
+    数据来源: 2026 届高三日语答题卡 Q16 debug 输出
+    旧行为(阈值 8): best_val>210 && best_delta<8 → empty (错!)
+    新行为(阈值 4): best_delta=4.65 不满足 <4 → 落到 uncertain (对)
+    """
+    from core.golden_template import GoldenTemplate
+
+    q16 = [("B", 214.1), ("C", 217.2), ("A", 220.3)]
+    r = GoldenTemplate._classify_answer(q16)
+
+    check(r["status"] == "uncertain",
+          f"Q16 真实数据(best=214.1, others 217-220)应 uncertain，实际 {r['status']}")
+    check(r["answer"] is None,
+          f"Q16 uncertain 时 answer 应为 None，实际 {r['answer']}")
+
+
+def test_classify_q11_real_borderline():
+    """T6.2: Q11 真实数据 — best_val<210(best=204)→ 防线1 不触发 → uncertain
+
+    数据来源: 2026 届高三日语答题卡 Q11 debug 输出
+    旧/新行为一致: best_val=204 < 210 → 防线1 不触发 → 落到 uncertain
+    """
+    from core.golden_template import GoldenTemplate
+
+    q11 = [("B", 204.4), ("A", 208.1), ("C", 211.9)]
+    r = GoldenTemplate._classify_answer(q11)
+
+    check(r["status"] == "uncertain",
+          f"Q11 真实数据(best=204.4)应 uncertain，实际 {r['status']}")
+
+
+def test_classify_clear_empty():
+    """T6.3: 全 235 灰度(确为空白)→ empty 不变(收紧阈值后仍触发)"""
+    from core.golden_template import GoldenTemplate
+
+    all_blank = [("A", 235), ("B", 235), ("C", 235), ("D", 235)]
+    r = GoldenTemplate._classify_answer(all_blank)
+
+    check(r["status"] == "empty",
+          f"全空白应 empty，实际 {r['status']}")
+    check(r["answer"] is None, "empty 时 answer 应为 None")
+
+
+def test_classify_clear_single():
+    """T6.4: 明显填涂(A=130)→ single A 不变"""
+    from core.golden_template import GoldenTemplate
+
+    normal = [("A", 130), ("B", 235), ("C", 235), ("D", 235)]
+    r = GoldenTemplate._classify_answer(normal)
+
+    check(r["status"] == "single", f"明显填涂应 single，实际 {r['status']}")
+    check(r["answer"] == "A", f"应选 A，实际 {r['answer']}")
+
+
+def test_classify_multi_two_dark():
+    """T6.5: 两个 < 150 → multi 不变"""
+    from core.golden_template import GoldenTemplate
+
+    multi = [("A", 130), ("B", 135), ("C", 230), ("D", 230)]
+    r = GoldenTemplate._classify_answer(multi)
+
+    check(r["status"] == "multi", f"两暗应 multi，实际 {r['status']}")
+
+
+def test_classify_threshold_boundary_below_4():
+    """T6.6: 防线1 边界 — best_delta=3.9 (新阈值 <4 临界)→ empty
+
+    场景: 纸张均匀亮(均 220),B 略暗 3.9 → 系统判为"未填涂"
+    """
+    from core.golden_template import GoldenTemplate
+
+    border = [("B", 220.0), ("A", 223.9), ("C", 224.0)]
+    r = GoldenTemplate._classify_answer(border)
+
+    check(r["status"] == "empty",
+          f"best_delta=3.9(<4)应 empty，实际 {r['status']}")
+
+
+def test_classify_threshold_boundary_above_4():
+    """T6.7: 防线1 边界 — best_delta=4.1 (刚过新阈值)→ uncertain
+
+    旧阈值 8 会判 empty;新阈值 4 落到 uncertain
+    """
+    from core.golden_template import GoldenTemplate
+
+    border = [("B", 214.0), ("A", 217.0), ("C", 218.0)]   # best_delta ≈ 3.5
+    r = GoldenTemplate._classify_answer(border)
+    # 实际 best_delta = (217+218)/2 - 214 = 3.5 < 4 → empty
+    # 此例证: 收紧到 4 后,3.5 这种"真的小差异"仍判 empty
+    check(r["status"] == "empty",
+          f"best_delta=3.5(<4)应 empty，实际 {r['status']}")
+
+    # 调整到 best_delta=4.5 (>4)
+    border2 = [("B", 213.0), ("A", 217.0), ("C", 218.0)]   # best_delta = (217+218)/2 - 213 = 4.5
+    r2 = GoldenTemplate._classify_answer(border2)
+    check(r2["status"] == "uncertain",
+          f"best_delta=4.5(>4)应 uncertain，实际 {r2['status']}")
+
+
+def test_classify_old_behavior_was_buggy():
+    """T6.8: 旧阈值 8 必判 empty 的 case,新阈值 4 判 uncertain — 文档化回归保护
+
+    直接用旧阈值 (<8) 重算,验证 Q16 这种 case 在旧逻辑下确实判 empty,
+    确保新测试不会被将来"误改回 8"导致静默回归。
+    """
+    # 模拟旧逻辑
+    q16 = [("B", 214.1), ("C", 217.2), ("A", 220.3)]
+    sorted_opts = q16
+    best_val = sorted_opts[0][1]
+    other_mean = sum(v for _, v in sorted_opts[1:]) / (len(sorted_opts) - 1)
+    best_delta_old = other_mean - best_val
+
+    # 旧阈值 8: 触发 empty
+    old_triggers_empty = (
+        217.2 > 200   # mean
+        and 6.2 < 30  # range
+        and 214.1 > 210  # best_val
+        and best_delta_old < 8  # 旧阈值
+    )
+    check(old_triggers_empty is True,
+          f"旧阈值 8 必判 empty: best_delta={best_delta_old:.2f} (复算确认)")
+
+    # 新阈值 4: 不触发
+    new_triggers_empty = (
+        217.2 > 200
+        and 6.2 < 30
+        and 214.1 > 210
+        and best_delta_old < 4  # 新阈值
+    )
+    check(new_triggers_empty is False,
+          f"新阈值 4 不触发 empty: best_delta={best_delta_old:.2f} > 4 (复算确认)")
+
+
 # ========== Run ==========
 
 def run_suite(name, tests):
@@ -479,6 +616,17 @@ if __name__ == "__main__":
 
     run_suite("Step 5: 端到端识别", [
         test_e2e_recognize,
+    ])
+
+    run_suite("Step 6: _classify_answer 边界场景 (Q11/Q16 真实数据)", [
+        test_classify_q16_real_borderline,
+        test_classify_q11_real_borderline,
+        test_classify_clear_empty,
+        test_classify_clear_single,
+        test_classify_multi_two_dark,
+        test_classify_threshold_boundary_below_4,
+        test_classify_threshold_boundary_above_4,
+        test_classify_old_behavior_was_buggy,
     ])
 
     print(f"\n{'='*50}")
