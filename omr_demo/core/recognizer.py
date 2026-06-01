@@ -22,7 +22,6 @@ v1.0 范围:
 """
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable, Optional, Any
-import time
 
 
 # ========== 数据结构 ==========
@@ -85,6 +84,26 @@ class RecognizeResult:
             "card_flag": self.card_flag,
             "debug_lines": list(self.debug_lines),
         }
+
+
+@dataclass
+class CrossValidatedResult(RecognizeResult):
+    """交叉验证结果 — 继承 RecognizeResult,新增验证字段
+
+    用于 RecognizerManager.cross_validate() 输出,保持与 RecognizeResult
+    的接口兼容性(scoring/preview 等下游代码 0 改动)。
+
+    字段:
+        per_q_cv: {q: {per_recognizer: {id: ans}, agreed: bool,
+                       consensus: str|None, agreement_type: str}}
+        agreement_rate: float            # 全题"agreed=True"占比 (0.0~1.0)
+        disputed_questions: list         # 分歧题号列表(供 Tab3 高亮)
+        recognizer_results: dict         # 各识别器独立结果 {id: RecognizeResult}
+    """
+    per_q_cv: dict = field(default_factory=dict)
+    agreement_rate: float = 1.0
+    disputed_questions: list = field(default_factory=list)
+    recognizer_results: dict = field(default_factory=dict)
 
 
 # ========== 协议 ==========
