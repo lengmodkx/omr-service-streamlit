@@ -836,7 +836,8 @@ with tab3:
                     row = {"学生ID": sid_r, "条形码": r.get("barcode", ""),
                            "选择题得分": r.get("_score", 0), "选择题满分": r.get("_total", 0),
                            "白卷": "是" if r.get("_is_blank") else "否",
-                           "异常标记": r.get("card_flag") or ""}
+                           "异常标记": r.get("card_flag") or "",
+                           "_answers_json": json.dumps(r.get("answers", {}), ensure_ascii=False)}
                     for q in sorted(r["answers"].keys()):
                         ans = corr_r.get(q)
                         if not ans:
