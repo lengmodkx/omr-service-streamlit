@@ -15,7 +15,6 @@ from typing import Any
 import time
 
 from core.recognizer import (
-    Recognizer,
     RecognizeContext,
     RecognizeResult,
     CrossValidatedResult,
@@ -112,6 +111,7 @@ class RecognizerManager:
         merged_answers: dict = {}
         disputed: list = []
         agreed_count = 0
+        n_recognizers = len(self._recognizers)
 
         for q in sorted(all_questions):
             per_recognizer = {}
@@ -119,7 +119,24 @@ class RecognizerManager:
                 ans_info = r.answers.get(q, {"answer": None, "status": "empty"})
                 per_recognizer[rec_id] = ans_info.get("answer")
 
-            comparison = self._compare_answers(per_recognizer)
+            # N=1 时,无比较意义,直接采用单识别器结果(标记为 all_match 或 all_empty)
+            if n_recognizers == 1:
+                only_ans = next(iter(per_recognizer.values()))
+                if only_ans is None:
+                    comparison = {
+                        "agreed": True,
+                        "consensus": None,
+                        "agreement_type": AGREE_ALL_EMPTY,
+                    }
+                else:
+                    comparison = {
+                        "agreed": True,
+                        "consensus": only_ans,
+                        "agreement_type": AGREE_ALL_MATCH,
+                    }
+            else:
+                comparison = self._compare_answers(per_recognizer)
+
             per_q_cv[q] = {
                 "per_recognizer": per_recognizer,
                 "agreed": comparison["agreed"],
