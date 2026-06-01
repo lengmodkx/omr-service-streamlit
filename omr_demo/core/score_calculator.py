@@ -22,7 +22,7 @@ class ScoringConfig:
     round_step: float = 1.0        # 取整步长(默认 1 = 整数;0.5 = 半取整)
     round_method: str = "round"    # "round" / "floor" / "ceil"
     multi_partial: bool = False    # 多选少选是否给一半分(demo 阶段永远 False)
-    ignore_case: bool = True       # 答案大小写不敏感
+    ignore_case: bool = False      # 答案大小写是否不敏感(默认 False,与旧 app.py 行为一致)
 
 
 # round_method 字符串到 math 函数的映射(避免 if-elif 链)

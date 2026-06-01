@@ -109,16 +109,17 @@ def test_multi_mismatch_extra_one():
     check(match_answer("ABCD", "ABC", multi=True) is False, "ABCD ⊃ ABC → False (多一个)")
 
 
-def test_case_insensitive_match():
-    """大小写不敏感(默认 ignore_case=True)"""
-    check(match_answer("a", "A") is True, "a vs A (ignore_case=True) → True")
-    check(match_answer("abc", "ABC", multi=True) is True, "abc vs ABC (ignore_case=True) → True")
+def test_case_sensitive_default():
+    """默认 ignore_case=False(与旧 app.py 行为严格一致)"""
+    check(match_answer("a", "A") is False, "a vs A (default) → False (大小写敏感)")
+    check(match_answer("abc", "ABC", multi=True) is False, "abc vs ABC (default, multi) → False")
 
 
-def test_case_sensitive_strict_mismatch():
-    """大小写敏感(ignore_case=False)"""
-    cfg = ScoringConfig(ignore_case=False)
-    check(match_answer("a", "A", cfg=cfg) is False, "a vs A (ignore_case=False) → False")
+def test_case_insensitive_when_explicit():
+    """显式 ignore_case=True 启用大小写不敏感(未来可选)"""
+    cfg = ScoringConfig(ignore_case=True)
+    check(match_answer("a", "A", cfg=cfg) is True, "a vs A (ignore_case=True) → True")
+    check(match_answer("abc", "ABC", multi=True, cfg=cfg) is True, "abc vs ABC (ignore_case=True, multi) → True")
 
 
 def test_empty_or_none_safe():
@@ -277,8 +278,8 @@ if __name__ == "__main__":
     test_multi_match_exact()
     test_multi_mismatch_missing_one()
     test_multi_mismatch_extra_one()
-    test_case_insensitive_match()
-    test_case_sensitive_strict_mismatch()
+    test_case_sensitive_default()
+    test_case_insensitive_when_explicit()
     test_empty_or_none_safe()
 
     print("\n[3] calc_total_score (9 例)")

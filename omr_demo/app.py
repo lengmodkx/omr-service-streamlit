@@ -18,6 +18,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core.processor import CardProcessor
 from core.golden_template import GoldenTemplate
+from core.score_calculator import calc_total_score, ScoringConfig
 
 st.set_page_config(page_title="答题卡智能处理系统", layout="wide")
 
@@ -807,21 +808,21 @@ with tab3:
 
             # 基于人工修正重新计分
             golden_ans = st.session_state.golden_answers
-            sc = 0
-            tot = len(golden_ans)
+            # 构造 effective_answers: 人工修正优先,否则用识别器结果
+            effective_answers = {}
             for q, std_ans in golden_ans.items():
-                final_ans = new_corr.get(q)  # 人工修正优先
-                if not final_ans:
+                corrected = new_corr.get(q)
+                if corrected:
+                    effective_answers[q] = {"answer": corrected, "status": "single"}
+                else:
                     ans_info = result["answers"].get(q, {})
-                    raw = ans_info.get("answer")
-                    final_ans = raw if raw else ""
-                if final_ans:
-                    if len(std_ans) > 1:
-                        # 多选题按字符集比较
-                        if set(final_ans) == set(std_ans):
-                            sc += 1
-                    elif final_ans == std_ans:
-                        sc += 1
+                    effective_answers[q] = {
+                        "answer": ans_info.get("answer"),
+                        "status": ans_info.get("status", "empty"),
+                    }
+            score_result = calc_total_score(effective_answers, golden_ans, ScoringConfig())
+            sc = score_result["total"]
+            tot = score_result["total_full"]
             st.metric("选择题最终得分", f"{sc} / {tot}")
 
             # 全局导出
