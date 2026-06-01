@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core.processor import CardProcessor
 from core.golden_template import GoldenTemplate
 from core.score_calculator import calc_total_score, ScoringConfig
+from core.recognizer import make_recognizer, RecognizeContext
 
 st.set_page_config(page_title="答题卡智能处理系统", layout="wide")
 
@@ -584,8 +585,13 @@ with tab2:
                     if img_a is None:
                         return None
 
-                    # 1. 黄金模板识别选择题（A面）
-                    r = gtp.recognize(img_a, debug=debug_mode)
+                    # 1. 黄金模板识别选择题（A面）— 走 Recognizer 协议入口
+                    recognizer = make_recognizer("golden", golden_template=gtp)
+                    result = recognizer.recognize(
+                        img_a,
+                        RecognizeContext(standard_answers=st.session_state.standard_answers),
+                    )
+                    r = result.to_legacy_dict()        # 转回 dict 形态,下游代码 0 改动
                     r["_key"] = key
                     r["_file_a"] = file_a.name
                     r["_file_b"] = file_b.name if file_b else ""
