@@ -4,7 +4,7 @@
 """
 import cv2
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 
 class GoldenTemplate:
@@ -203,6 +203,65 @@ class GoldenTemplate:
         except cv2.error:
             return tgt_blur, False
 
+    @staticmethod
+    def _classify_answer(sorted_opts: List[Tuple[str, float]]) -> Dict:
+        """根据题目各选项灰度判定答案状态 — 纯函数,易测
+
+        输入: 按灰度升序排列的 [(opt, gray_val), ...] 列表
+        输出: {"answer": str|None, "status": "single"|"multi"|"empty"|"uncertain"}
+
+        判定路径(顺序匹配,首中即返回):
+        1. 防线1 亮纸-浅差: 全部偏亮且接近且最暗项也不暗 → empty
+        2. 防线2 多涂: 多个暗项 → multi
+        3. 防线3 明显暗: best 显著暗于其他 → single
+        4. 防线3b 浅填涂: 浅差异但纸张较暗 → single
+        5. 模糊: 以上都不满足 → uncertain (建议人工核对)
+
+        阈值说明(2026-06 优化):
+        - 防线1 best_delta 阈值: 8 → 4
+        - 旧阈值会把 Q16 这类"纸张亮 + 浅填涂 + best_delta≈6"误判为 empty
+        - 新阈值让 borderline case 落到 uncertain,进人工核对面板
+        """
+        if not sorted_opts:
+            return {"answer": None, "status": "empty"}
+
+        best_opt, best_val = sorted_opts[0]
+        second_val = sorted_opts[1][1] if len(sorted_opts) > 1 else 255
+        all_vals = [v for _, v in sorted_opts]
+
+        # 相对阈值:基于本题内部各选项的相对暗度,适应不同扫描亮度
+        other_mean = sum(v for _, v in sorted_opts[1:]) / (len(sorted_opts) - 1) if len(sorted_opts) > 1 else 255
+        best_delta = other_mean - best_val    # best 比其他选项均值暗多少
+        gap = second_val - best_val
+        mean_val = sum(all_vals) / len(all_vals)
+        range_val = sorted_opts[-1][1] - sorted_opts[0][1]
+        best_vs_brightest = sorted_opts[-1][1] - best_val
+
+        # 多涂检测: 相对(明显低于其他均值)或 绝对(多个极暗)双保险
+        dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 150)
+        abs_dark = sum(1 for v in all_vals if v < 140)  # 处理全体偏暗的极端情况
+        # 收集所有填涂的选项(用于多选题显示),与上方检测口径一致
+        dark_opts = sorted([o for o, v in sorted_opts if (other_mean - v > 24 and v < 150) or v < 140])
+
+        # 防线1: 全部偏亮且接近且最暗项也不暗(且无明显填涂信号) → 未填涂
+        # 收紧 best_delta 阈值 8→4: 防止浅填涂(best_val>210)被误判为空题
+        if mean_val > 200 and range_val < 30 and best_val > 210 and best_delta < 4:
+            return {"answer": None, "status": "empty"}
+        # 防线2: 两个以上暗 → 多选
+        # gap>30 说明最佳选项明显独占,即使 dark_count>=2 也不判多选
+        # abs_dark 仅在整体偏暗时(mean<130)启用,避免正常亮度下误判
+        elif (dark_count >= 2 and gap <= 30) or (abs_dark >= 2 and gap <= 20 and mean_val < 130):
+            return {"answer": "".join(dark_opts) if dark_opts else best_opt, "status": "multi"}
+        # 防线3: best 明显暗于其他 → 选中
+        elif best_delta > 9 and (gap > 2 or best_vs_brightest > 15):
+            return {"answer": best_opt, "status": "single"}
+        # 防线3b: 浅填涂/阴影区域兼容,降低 best_delta 和 best_val 门槛
+        elif best_delta > 6 and gap > 1 and (best_val < 210 or mean_val < 215):
+            return {"answer": best_opt, "status": "single"}
+        # 模糊
+        else:
+            return {"answer": None, "status": "uncertain"}
+
     def recognize(self, target_img: np.ndarray, debug: bool = False) -> Dict:
         """主入口：全局ECC对齐 → 采样 → 判断 → 对比黄金答案。
         设置 debug=True 打印每题的详细采样值，用于诊断识别失败原因。"""
@@ -270,52 +329,27 @@ class GoldenTemplate:
 
         for q, opts in q_groups.items():
             sorted_opts = sorted(opts.items(), key=lambda x: x[1])
-            if not sorted_opts:
-                answers[q] = {"answer": None, "status": "empty"}
-                empty_count += 1
-                continue
-
-            best_opt, best_val = sorted_opts[0]
-            second_val = sorted_opts[1][1] if len(sorted_opts) > 1 else 255
-
-            all_vals = [v for _, v in sorted_opts]
             gold_ans = self.answers.get(q)
 
-            # 相对阈值：基于本题内部各选项的相对暗度，适应不同扫描亮度
-            other_mean = sum(v for _, v in sorted_opts[1:]) / (len(sorted_opts) - 1) if len(sorted_opts) > 1 else 255
-            best_delta = other_mean - best_val    # best 比其他选项均值暗多少
-            gap = second_val - best_val
-            mean_val = sum(all_vals) / len(all_vals)
-            range_val = sorted_opts[-1][1] - sorted_opts[0][1]
-            gap_ratio = gap / max(range_val, 10)
-            best_vs_brightest = sorted_opts[-1][1] - best_val
-
-            # 多涂检测：相对（明显低于其他均值）或 绝对（多个极暗）双保险
-            dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 150)
-            abs_dark = sum(1 for v in all_vals if v < 140)  # 处理全体偏暗的极端情况，阈值比relative更严格
-            # 收集所有填涂的选项（用于多选题显示），与上方检测口径一致
-            dark_opts = sorted([o for o, v in sorted_opts if (other_mean - v > 24 and v < 150) or v < 140])
-
-            # 防线1: 全部偏亮且接近且最暗项也不暗（且无明显填涂信号）→ 未填涂
-            # best_val>210 防止浅填涂（如205）被误判为空题
-            if mean_val > 200 and range_val < 30 and best_val > 210 and best_delta < 8:
-                answers[q] = {"answer": None, "status": "empty"}
+            # 调用纯函数判定(防线1-3b + uncertain)— 顺序已在 _classify_answer 内固定
+            classification = self._classify_answer(sorted_opts)
+            answers[q] = {
+                "answer": classification["answer"],
+                "status": classification["status"],
+            }
+            if classification["status"] == "empty":
                 empty_count += 1
-            # 防线2: 两个以上暗 → 多选（相对检测 + 绝对检测双保险）
-            # gap>30 说明最佳选项明显独占，即使 dark_count>=2 也不判多选
-            # abs_dark 仅在整体偏暗时(mean<130)启用，避免正常亮度下误判
-            elif (dark_count >= 2 and gap <= 30) or (abs_dark >= 2 and gap <= 20 and mean_val < 130):
-                answers[q] = {"answer": "".join(dark_opts) if dark_opts else best_opt, "status": "multi"}
+            elif classification["status"] == "multi":
                 multi_count += 1
-            # 防线3: best明显暗于其他 → 选中
-            elif best_delta > 9 and (gap > 2 or gap_ratio > 0.06 or best_vs_brightest > 15):
-                answers[q] = {"answer": best_opt, "status": "single"}
-            # 防线3b: 浅填涂/阴影区域兼容，降低 best_delta 和 best_val 门槛
-            elif best_delta > 6 and gap > 1 and (best_val < 210 or mean_val < 215):
-                answers[q] = {"answer": best_opt, "status": "single"}
-            # 模糊
-            else:
-                answers[q] = {"answer": None, "status": "uncertain"}
+
+            # 复算 _classify_answer 内部已用的关键变量(用于 debug 输出)
+            best_opt, best_val = sorted_opts[0] if sorted_opts else ("?", 255)
+            second_val = sorted_opts[1][1] if len(sorted_opts) > 1 else 255
+            all_vals = [v for _, v in sorted_opts]
+            other_mean = sum(v for _, v in sorted_opts[1:]) / (len(sorted_opts) - 1) if len(sorted_opts) > 1 else 255
+            gap = second_val - best_val
+            mean_val = sum(all_vals) / len(all_vals) if all_vals else 255
+            dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 150)
 
             # 与黄金答案对比（多选题按字符集比较，顺序无关）
             ans = answers[q]["answer"]
