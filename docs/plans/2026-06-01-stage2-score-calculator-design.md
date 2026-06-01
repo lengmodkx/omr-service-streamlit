@@ -25,7 +25,7 @@
 | `omr_demo/core/score_calculator.py` | **新增** | ~80 行（含 docstring） |
 | `omr_demo/tests/__init__.py` | **新增** | 空文件 |
 | `omr_demo/tests/test_score_calculator.py` | **新增** | ~120 行（22 用例） |
-| `omr_demo/app.py` | **改** | -8 行（替换 810-825 内联循环）<br>+2 行（export_rows 加列） |
+| `omr_demo/app.py` | **改** | -8 行（替换 810-825 内联循环）；+2 行（export_rows 加列） |
 | `omr_demo/core/golden_template.py` | **不改** | 阶段 2 不动 recognizer |
 
 **`golden_template.py:322-326` 的 `correct` 字段保留**：阶段 2 暂不动它，识别器仍输出 `correct` 字段供显示用。ScoreCalculator 是**平行的"真理源"**，两者并存直到阶段 7 整合。
@@ -91,16 +91,19 @@ def calc_total_score(
 
 **实现规则**（与现有 app.py:810-825 行为严格一致）：
 
-| 状态 | earned | correct |
-|------|--------|---------|
-| `single` + 匹配 | 1.0 | True |
-| `single` + 不匹配 | 0.0 | False |
-| `empty` | 0.0 | False |
-| `multi` | 0.0（按当前 demo 规则） | False |
-| `uncertain` | 0.0 | False |
-| `None` answer | 0.0 | False |
+**核心原则**：`status` 字段**不参与算分**，仅用于 UI 显示和 stats 计数。`earned` 取决于答案字符串与 gold 字符串的**集合/相等比较**结果。
 
-**多选识别**（`multi` 参数）：当 `len(gold) > 1` 时 `multi=True`，走 `match_answer` 的集合匹配。
+| answer | gold | multi (gold 长度) | 行为 | earned | correct |
+|--------|------|------------------|------|--------|---------|
+| `"A"` | `"A"` | False | 严格相等 | 1.0 | True |
+| `"B"` | `"A"` | False | 不等 | 0.0 | False |
+| `"ABC"` | `"ABC"` | True | 集合相等 | 1.0 | True |
+| `"AB"` | `"ABC"` | True | 集合不等 | 0.0 | False |
+| `""` / `None` | `"A"` | — | 空值 | 0.0 | False |
+| `"AB"` | `"A"` | False | 单选被多涂 | 0.0 | False |
+| `"AB"` | `"AB"` | False | 单选长度+多涂 | 0.0 | False |
+
+**多选识别**（`multi` 参数）：当 `len(gold) > 1` 时 `multi=True`，走 `match_answer` 的集合匹配。`multi=True` 但 answer 为 `multi` status 时**也算分**（不影响正确性判定）。
 
 ---
 
