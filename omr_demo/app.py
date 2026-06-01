@@ -20,6 +20,7 @@ from core.processor import CardProcessor
 from core.golden_template import GoldenTemplate
 from core.score_calculator import calc_total_score, ScoringConfig
 from core.recognizer import make_recognizer, RecognizeContext
+from core.recognizer_manager import RecognizerManager
 
 st.set_page_config(page_title="答题卡智能处理系统", layout="wide")
 
@@ -564,6 +565,11 @@ with tab2:
             st.write(f"识别到 **{len(valid)}** 组A+B配对，**{len(single_a)}** 张单A面，**{len(single_b)}** 张单B面")
 
             debug_mode = st.checkbox("调试模式（输出每题详细采样值）", key="debug_unified")
+            enable_cv = st.checkbox(
+                "启用双识别器交叉验证 (黄金模板 + 差分法, 慢但更准)",
+                value=False, key="enable_cross_validate",
+                help="同一张卡跑两个识别器,分歧题自动进人工核对面板"
+            )
 
             if st.button("开始处理", type="primary"):
                 gtp = st.session_state.golden_template
@@ -586,15 +592,33 @@ with tab2:
                         return None
 
                     # 1. 黄金模板识别选择题（A面）— 走 Recognizer 协议入口
-                    recognizer = make_recognizer("golden", golden_template=gtp)
-                    result = recognizer.recognize(
-                        img_a,
-                        RecognizeContext(standard_answers=st.session_state.standard_answers),
-                    )
+                    if enable_cv:
+                        # 双识别器交叉验证 (黄金模板 + 差分法)
+                        golden_rec = make_recognizer("golden", golden_template=gtp)
+                        diff_rec = make_recognizer(
+                            "differential",
+                            processor=st.session_state.processor,
+                            page="A",
+                        )
+                        manager = RecognizerManager([golden_rec, diff_rec])
+                        result = manager.cross_validate(
+                            img_a,
+                            RecognizeContext(standard_answers=st.session_state.standard_answers),
+                        )
+                    else:
+                        # 单识别器(原有路径)
+                        recognizer = make_recognizer("golden", golden_template=gtp)
+                        result = recognizer.recognize(
+                            img_a,
+                            RecognizeContext(standard_answers=st.session_state.standard_answers),
+                        )
                     r = result.to_legacy_dict()        # 转回 dict 形态,下游代码 0 改动
                     r["_key"] = key
                     r["_file_a"] = file_a.name
                     r["_file_b"] = file_b.name if file_b else ""
+                    # 交叉验证结果字段(未启用时为占位空值,Tab3 展示 0 差异)
+                    r["_disputed_questions"] = getattr(result, "disputed_questions", [])
+                    r["_agreement_rate"] = getattr(result, "agreement_rate", 1.0)
 
                     # 1b. 生成识别预览图（气泡采样点叠加在原图上）
                     os.makedirs(output_dir, exist_ok=True)
@@ -719,6 +743,8 @@ with tab2:
                             "得分": f"{r.get('_score', 0)}/{r.get('_total', 0)}",
                             "漏涂": r["empty_count"],
                             "多选": r["multi_count"],
+                            "分歧": len(r.get("_disputed_questions", [])),
+                            "一致率": f"{r.get('_agreement_rate', 1.0)*100:.0f}%",
                         })
                     df = pd.DataFrame(rows)
                     st.dataframe(df)
@@ -750,6 +776,18 @@ with tab3:
             st.subheader(f"📋 {sid}{blank_tag} - 识别详情")
             if result.get("_is_blank"):
                 st.warning("该试卷识别率低于50%，判定为白卷，得分已置为0")
+
+            # 交叉验证分歧题提示(阶段 7 新增)
+            disputed = result.get("_disputed_questions", [])
+            agreement = result.get("_agreement_rate", 1.0)
+            if disputed:
+                preview_list = disputed[:8]
+                more = f" 等共 {len(disputed)} 题" if len(disputed) > 8 else ""
+                st.warning(
+                    f"⚠️ 双识别器交叉验证发现 {len(disputed)} 个分歧题: "
+                    f"{preview_list}{more}，识别器一致率 {agreement*100:.0f}%。"
+                    f"建议优先人工核对分歧题。"
+                )
 
             # 黄金模板识别预览图
             preview_path = result.get("_preview_path")
