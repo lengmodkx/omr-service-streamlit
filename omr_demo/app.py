@@ -716,17 +716,13 @@ with tab2:
                     correct_count = sum(1 for ans in r["answers"].values()
                                         if ans.get("correct") is True)
                     if total_q >= 3 and identified_count >= 3 and correct_count / identified_count < 0.1:
-                        degraded = 0
                         for ans in r["answers"].values():
                             if ans.get("answer") is not None and ans.get("correct") is not True:
                                 ans["status"] = "uncertain"
                                 ans["answer"] = None
                                 ans["correct"] = None
-                                degraded += 1
-                        if degraded > 0:
-                            r["_is_blank"] = True
-                            r["_score"] = 0
-                            r["_degraded_count"] = degraded  # 记录被降级数,供调试
+                        r["_is_blank"] = True
+                        r["_score"] = 0
 
                     if r["_is_blank"]:
                         r["_score"] = 0

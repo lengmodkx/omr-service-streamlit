@@ -3,13 +3,17 @@ Recognizer 协议测试套件
 设计文档: docs/plans/2026-06-01-stage1-recognizer-abstraction-design.md §6
 
 运行方式: python omr_demo/test_recognizer.py
-期望输出: 12 PASS, 0 FAIL
+期望输出: 10 PASS, 0 FAIL
 
 测试组织:
-- 协议一致性 (4 例): isinstance / can_handle 返回 bool / recognize 返回 dataclass
+- 协议一致性 (3 例): isinstance / can_handle 返回 bool / recognize 返回 dataclass
 - 字段完备性 (3 例): 必需字段 / 默认值 / 字段类型
 - 行为 (3 例): 工厂函数 / duration > 0 / recognizer_id 一致性
-- 异常路径 (2 例): 未知 id 抛 ValueError / 空图像不崩溃
+- 异常路径 (1 例): 未知 id 抛 ValueError
+
+历史:
+- 2026-06-04: 移除 DifferentialRecognizer 相关测试(差分法适配器已废弃)
+  原 12 例 → 现 10 例
 """
 import sys
 try:
@@ -30,7 +34,6 @@ from core.recognizer import (
     list_recognizer_ids,
 )
 from core.recognizers.golden import GoldenTemplateRecognizer
-from core.recognizers.differential import DifferentialRecognizer
 
 PASSED = 0
 FAILED = 0
@@ -46,23 +49,19 @@ def check(condition, msg):
         print(f"  FAIL: {msg}")
 
 
-# ========== 1. 协议一致性 (4 例) ==========
+# ========== 1. 协议一致性 (3 例) ==========
 
 def test_recognizer_protocol_conformance():
-    """两个适配器都通过 isinstance(rec, Recognizer) 检查"""
+    """golden 适配器通过 isinstance(rec, Recognizer) 检查"""
     golden = GoldenTemplateRecognizer(golden_template=None)
-    diff = DifferentialRecognizer(processor=None)
     check(isinstance(golden, Recognizer), "GoldenTemplateRecognizer is Recognizer")
-    check(isinstance(diff, Recognizer), "DifferentialRecognizer is Recognizer")
 
 
 def test_can_handle_returns_bool():
     """can_handle 永远返回 bool,不抛异常"""
     golden = GoldenTemplateRecognizer(golden_template=None)
-    diff = DifferentialRecognizer(processor=None)
     ctx = RecognizeContext()
     check(golden.can_handle(ctx) is False, "golden None template -> False (bool)")
-    check(diff.can_handle(ctx) is False, "diff None processor -> False (bool)")
     # True 情况:用 mock 构造有内容的环境
     gtp_mock = MagicMock()
     gtp_mock.bubbles = [{"q": 1, "opt": "A"}]
@@ -90,13 +89,9 @@ def test_recognize_returns_dataclass():
 def test_protocol_class_attributes():
     """协议类属性 (name/id/requires_blank) 都存在且类型正确"""
     golden = GoldenTemplateRecognizer(golden_template=None)
-    diff = DifferentialRecognizer(processor=None)
     check(isinstance(golden.name, str) and len(golden.name) > 0, "golden.name is non-empty str")
     check(isinstance(golden.id, str) and golden.id == "golden", "golden.id == 'golden'")
     check(golden.requires_blank is False, "golden.requires_blank == False")
-    check(isinstance(diff.name, str) and len(diff.name) > 0, "diff.name is non-empty str")
-    check(isinstance(diff.id, str) and diff.id == "differential", "diff.id == 'differential'")
-    check(diff.requires_blank is True, "diff.requires_blank == True")
 
 
 # ========== 2. 字段完备性 (3 例) ==========
@@ -142,23 +137,19 @@ def test_recognize_result_types():
 # ========== 3. 行为 (3 例) ==========
 
 def test_make_recognizer_factory():
-    """make_recognizer 工厂函数能正确构造 2 个适配器"""
+    """make_recognizer 工厂函数能正确构造 golden 适配器"""
     gtp_mock = MagicMock()
     gtp_mock.bubbles = [{"q": 1}]
     g = make_recognizer("golden", golden_template=gtp_mock)
     check(isinstance(g, GoldenTemplateRecognizer), "make_recognizer('golden') -> GoldenTemplateRecognizer")
 
-    proc_mock = MagicMock()
-    proc_mock.template = {"pages": {"A": {"bubbles": [{"q": 1}]}}}
-    d = make_recognizer("differential", processor=proc_mock, page="A")
-    check(isinstance(d, DifferentialRecognizer), "make_recognizer('differential') -> DifferentialRecognizer")
-
 
 def test_list_recognizer_ids():
-    """list_recognizer_ids() 返回已注册 ID 列表"""
+    """list_recognizer_ids() 返回已注册 ID 列表(差分法已移除)"""
     ids = list_recognizer_ids()
     check("golden" in ids, "list contains 'golden'")
-    check("differential" in ids, "list contains 'differential'")
+    check("differential" not in ids, "list does NOT contain 'differential' (已废弃)")
+    check(len(ids) == 1, f"list length == 1 (got {len(ids)})")
 
 
 def test_duration_ms_and_recognizer_id_from_recognize():
@@ -178,39 +169,17 @@ def test_duration_ms_and_recognizer_id_from_recognize():
     check(result.debug_lines == ["test"], "debug_lines propagated from underlying")
 
 
-# ========== 4. 异常路径 (2 例) ==========
+# ========== 4. 异常路径 (1 例) ==========
 
 def test_make_recognizer_unknown_id():
     """make_recognizer 未知 ID 抛 ValueError"""
     raised = False
     try:
-        make_recognizer("yolo")
+        make_recognizer("differential")  # 差分法已移除,现在应该抛错
     except ValueError as e:
         raised = True
-        check("yolo" in str(e) or "未知" in str(e), "ValueError message mentions unknown id")
-    check(raised, "ValueError raised for unknown id")
-
-
-def test_differential_multi_detection():
-    """DifferentialRecognizer 把 '(多涂)' 后缀正确转换为 status='multi'"""
-    proc_mock = MagicMock()
-    proc_mock.recognize_choices.return_value = {
-        1: "A",
-        2: "BC(多涂)",       # 多涂:去除后缀
-        3: None,             # 空答
-        4: "D(多涂)",        # 多涂
-    }
-    rec = DifferentialRecognizer(proc_mock, page="A")
-    result = rec.recognize(np.zeros((100, 100, 3), dtype=np.uint8), RecognizeContext())
-    check(result.answers[1]["status"] == "single", "Q1 'A' -> single")
-    check(result.answers[2]["status"] == "multi", "Q2 'BC(多涂)' -> multi")
-    check(result.answers[2]["answer"] == "BC", "Q2 answer normalized to 'BC' (suffix removed)")
-    check(result.answers[3]["status"] == "empty", "Q3 None -> empty")
-    check(result.answers[4]["status"] == "multi", "Q4 'D(多涂)' -> multi")
-    check(result.answers[4]["answer"] == "D", "Q4 answer normalized to 'D'")
-    check(result.multi_count == 2, f"multi_count == 2 (got {result.multi_count})")
-    check(result.empty_count == 1, f"empty_count == 1 (got {result.empty_count})")
-    check(result.total == 4, f"total == 4 (got {result.total})")
+        check("differential" in str(e) or "未知" in str(e), "ValueError message mentions unknown id")
+    check(raised, "ValueError raised for unknown id (differential 已被移除)")
 
 
 # ========== 运行入口 ==========
@@ -220,11 +189,10 @@ if __name__ == "__main__":
     print("Recognizer 协议测试")
     print("=" * 60)
 
-    print("\n[1] 协议一致性 (4 例)")
+    print("\n[1] 协议一致性 (3 例)")
     test_recognizer_protocol_conformance()
     test_can_handle_returns_bool()
     test_recognize_returns_dataclass()
-    test_protocol_class_attributes()
 
     print("\n[2] 字段完备性 (3 例)")
     test_recognize_result_required_fields()
@@ -236,9 +204,8 @@ if __name__ == "__main__":
     test_list_recognizer_ids()
     test_duration_ms_and_recognizer_id_from_recognize()
 
-    print("\n[4] 异常路径 (2 例)")
+    print("\n[4] 异常路径 (1 例)")
     test_make_recognizer_unknown_id()
-    test_differential_multi_detection()
 
     print("\n" + "=" * 60)
     print(f"总计: {PASSED} passed, {FAILED} failed")

@@ -2,23 +2,27 @@
 Recognizer 协议 — 统一识别器接口
 
 设计目标:
-- 所有识别方式(差分法/黄金模板/YOLO/AI)实现同一接口
+- 所有识别方式(黄金模板/YOLO/AI)实现同一接口
 - 零 OpenCV 依赖(本文件不 import cv2, 保持微服务可平移)
 - runtime_checkable 协议,支持 isinstance(rec, Recognizer) 检查
 - RecognizeResult 是 dataclass,便于下游消费者做字段访问
 
 核心字段说明:
 - answers: {q: {"answer": str|None, "status": str, "correct": bool|None}}
-  - answer: 识别出的答案字符串(单选 "A" / 多选 "ABC" / "(多涂)" / None)
+  - answer: 识别出的答案字符串(单选 "A" / 多选 "ABC" / None)
   - status: 题目级状态 - "single" / "multi" / "empty" / "uncertain"
   - correct: 与标准答案对比结果 - True / False / None(无标准答案或无答案)
 - card_flag: 卡片级异常标记 - "abnormal" / "suspicious_blank" / "invalid_image" / None
 - duration_ms: 单张卡识别耗时,用于性能基线对比
-- recognizer_id: 哪个识别器跑的,为阶段 7 交叉验证铺垫
+- recognizer_id: 哪个识别器跑的
 
 v1.0 范围:
-- 定义协议 + 2 个 dataclass + 工厂函数
+- 定义协议 + 1 个 dataclass + 工厂函数
 - 真实识别器实现在 core/recognizers/ 子包
+
+历史:
+- 2026-06-04: 移除 CrossValidatedResult / DifferentialRecognizer / RecognizerManager
+  阶段 7 双识别器交叉验证被废弃,Tab3 改用单识别器 + 人工核对兜底
 """
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable, Optional, Any
@@ -31,13 +35,13 @@ class RecognizeContext:
     """识别上下文 — 识别器所需的所有外部依赖打包
 
     Attributes:
-        template_config: 模板 JSON dict(可空,差分法需要,黄金模板法不需要)
-        blank_refs: 空白参考 {A: np.ndarray, B: np.ndarray}(差分法需要)
+        template_config: 模板 JSON dict(可空,黄金模板法不需要)
+        blank_refs: 空白参考 {A: np.ndarray, B: np.ndarray}(黄金模板法不需要)
         column_boxes: 黄金模板列框[{x1, y1, x2, y2}, ...]
         custom_bubbles: 自定义选项框[{q, opt, x, y, w, h}, ...]
         standard_answers: 标准答案 {q: "A" 或 "ABC"}(可选,用于算 correct)
         page: A 面 / B 面
-        threshold: 差分法识别阈值(darkness 比例)
+        threshold: 暗度识别阈值(预留,目前黄金模板不直接使用)
     """
     template_config: Optional[dict] = None
     blank_refs: dict = field(default_factory=dict)
@@ -86,26 +90,6 @@ class RecognizeResult:
         }
 
 
-@dataclass
-class CrossValidatedResult(RecognizeResult):
-    """交叉验证结果 — 继承 RecognizeResult,新增验证字段
-
-    用于 RecognizerManager.cross_validate() 输出,保持与 RecognizeResult
-    的接口兼容性(scoring/preview 等下游代码 0 改动)。
-
-    字段:
-        per_q_cv: {q: {per_recognizer: {id: ans}, agreed: bool,
-                       consensus: str|None, agreement_type: str}}
-        agreement_rate: float            # 全题"agreed=True"占比 (0.0~1.0)
-        disputed_questions: list         # 分歧题号列表(供 Tab3 高亮)
-        recognizer_results: dict         # 各识别器独立结果 {id: RecognizeResult}
-    """
-    per_q_cv: dict = field(default_factory=dict)
-    agreement_rate: float = 1.0
-    disputed_questions: list = field(default_factory=list)
-    recognizer_results: dict = field(default_factory=dict)
-
-
 # ========== 协议 ==========
 
 @runtime_checkable
@@ -130,7 +114,6 @@ class Recognizer(Protocol):
         """根据上下文判断是否可处理
 
         典型实现:
-        - DifferentialRecognizer: ctx.blank_refs.get("A") is not None
         - GoldenTemplateRecognizer: self._gtp is not None 且 bubbles 非空
         - YoloRecognizer: ctx.template_config.get("yolo_model") is not None
         """
@@ -156,7 +139,6 @@ def make_recognizer(recognizer_id: str, **kwargs) -> Recognizer:
 
     用法:
         rec = make_recognizer("golden", golden_template=gtp)
-        rec = make_recognizer("differential", processor=cp, page="A")
         rec = make_recognizer("yolo", model_path="...")        # 未来
         rec = make_recognizer("ai", api_key="...")              # 未来
 
@@ -169,15 +151,12 @@ def make_recognizer(recognizer_id: str, **kwargs) -> Recognizer:
     if recognizer_id == "golden":
         from core.recognizers.golden import GoldenTemplateRecognizer
         return GoldenTemplateRecognizer(**kwargs)
-    if recognizer_id == "differential":
-        from core.recognizers.differential import DifferentialRecognizer
-        return DifferentialRecognizer(**kwargs)
     raise ValueError(
         f"未知的 recognizer_id: {recognizer_id!r}。"
-        f"已实现: golden, differential。未来: yolo, ai。"
+        f"已实现: golden。未来: yolo, ai。"
     )
 
 
 def list_recognizer_ids() -> list:
     """列出已注册的识别器 ID(用于 UI 下拉框)"""
-    return ["golden", "differential"]
+    return ["golden"]

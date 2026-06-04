@@ -79,6 +79,65 @@ def test_grid_basic():
     check(q1a["h"] > 6, f"气泡高度应>6, 实际{q1a['h']}")
 
 
+def test_grid_reverse_q():
+    """T7.1: reverse_q=True 时 Q1 放在 y2 端(最下),Q_max 在 y1 端(最上)
+
+    用于 OMR0002 蒙文答题卡"题号倒序排列"场景
+    """
+    from core.golden_template import GoldenTemplate
+
+    config = {
+        "x1": 100, "y1": 200, "x2": 400, "y2": 700,
+        "start_q": 1, "num_q": 5, "num_options": 4,
+        "reverse_q": True,
+    }
+    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    bubbles = gtp._generate_grid(config)
+
+    row_h = (700 - 200) / 5  # 100
+
+    # Q1 应在 y2 端(最下): cy = y2 - row_h/2 = 700 - 50 = 650
+    q1 = next(b for b in bubbles if b["q"] == 1 and b["opt"] == "A")
+    expected_q1_cy = int(700 - row_h / 2)  # 650
+    check(abs(q1["y"] - expected_q1_cy) <= 1,
+          f"reverse_q=True: Q1 y 应在 y2 端(最下)≈{expected_q1_cy}，实际{q1['y']}")
+
+    # Q5 应在 y1 端(最上): cy = y1 + row_h/2 = 200 + 50 = 250
+    q5 = next(b for b in bubbles if b["q"] == 5 and b["opt"] == "A")
+    expected_q5_cy = int(200 + row_h / 2)  # 250
+    check(abs(q5["y"] - expected_q5_cy) <= 1,
+          f"reverse_q=True: Q5 y 应在 y1 端(最上)≈{expected_q5_cy}，实际{q5['y']}")
+
+    # 倒序时 Q1 和 Q5 的 y 位置应交换
+    config_normal = {**config, "reverse_q": False}
+    bubbles_normal = gtp._generate_grid(config_normal)
+    q1_normal = next(b for b in bubbles_normal if b["q"] == 1 and b["opt"] == "A")
+    check(abs(q1["y"] - q1_normal["y"]) > 100,
+          f"reverse_q=True 时 Q1.y({q1['y']}) 应远离 normal Q1.y({q1_normal['y']})")
+
+
+def test_grid_reverse_q_default_false():
+    """T7.2: 不传 reverse_q 时默认 False(向后兼容)
+
+    现有模板 JSON 没有 reverse_q 字段,必须默认正常排序
+    """
+    from core.golden_template import GoldenTemplate
+
+    config = {
+        "x1": 100, "y1": 200, "x2": 400, "y2": 700,
+        "start_q": 1, "num_q": 5, "num_options": 4,
+        # 注意: 没有 reverse_q 字段
+    }
+    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    bubbles = gtp._generate_grid(config)
+
+    row_h = (700 - 200) / 5
+    q1 = next(b for b in bubbles if b["q"] == 1 and b["opt"] == "A")
+    expected_q1_cy = int(200 + row_h / 2)  # 250 (顶部)
+    check(abs(q1["y"] - expected_q1_cy) <= 1,
+          f"默认 reverse_q=False: Q1 y 应在 y1 端(最上)≈{expected_q1_cy}，实际{q1['y']}")
+
+
 def test_grid_three_options():
     """3选项版面（常见于物理/化学选择题只有ABC三个选项）"""
     from core.golden_template import GoldenTemplate

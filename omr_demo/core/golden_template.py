@@ -243,10 +243,8 @@ class GoldenTemplate:
         abs_dark = sum(1 for v in all_vals if v < 140)  # 处理全体偏暗的极端情况
         # 收集所有填涂的选项(用于多选题显示),与上方检测口径一致
         dark_opts = sorted([o for o, v in sorted_opts if (other_mean - v > 24 and v < 150) or v < 140])
-        # 空白信号分两层:
-        # - weak_white (>248):  灰度>248,用于防线3b 降低门槛
-        # - strong_white (>=254): 真正接近纯白,用于防线1 豁免 + 防线3b 极浅填涂识别
-        white_count = sum(1 for v in all_vals if v > 248)
+        # 空白信号: ≥2 个其他选项是真正纯白(>=254)时,允许 best 略有差异不判 empty
+        # 用于防线1 豁免,避免"大部分选项 248~252,best=240"的浅填涂被误判为空
         strong_white = sum(1 for v in all_vals if v >= 254)
 
         # 防线1: 全部偏亮且接近且最暗项也不暗(且无明显填涂信号) → 未填涂
