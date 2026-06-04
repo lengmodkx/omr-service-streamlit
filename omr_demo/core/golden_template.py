@@ -26,12 +26,18 @@ class GoldenTemplate:
 
     @staticmethod
     def _generate_grid(cfg: Dict) -> List[Dict]:
-        """根据列框配置均匀切分，返回该列所有气泡坐标"""
+        """根据列框配置均匀切分，返回该列所有气泡坐标
+
+        2026-06-04 新增 reverse_q: 倒序题号
+        True → Q1 在 y2 端（最下）, Q_max 在 y1 端（最上）
+        用于 OMR0002 蒙文答题卡"题号倒序排列"场景
+        """
         x1, y1 = cfg["x1"], cfg["y1"]
         x2, y2 = cfg["x2"], cfg["y2"]
         start_q = cfg["start_q"]
         num_q = cfg["num_q"]
         num_options = cfg["num_options"]
+        reverse_q = cfg.get("reverse_q", False)  # 2026-06-04 新增
 
         col_w = (x2 - x1) / num_options
         row_h = (y2 - y1) / num_q
@@ -41,7 +47,9 @@ class GoldenTemplate:
         bubbles = []
         for qi in range(num_q):
             qn = start_q + qi
-            cy = int(y1 + qi * row_h + row_h / 2)
+            # 倒序时: qi=0 (Q1) 在 y2 端(最下), qi=last 在 y1 端(最上)
+            row_idx = (num_q - 1 - qi) if reverse_q else qi
+            cy = int(y1 + row_idx * row_h + row_h / 2)
             for oi in range(num_options):
                 opt = chr(ord("A") + oi)
                 cx = int(x1 + oi * col_w + col_w / 2)
@@ -56,7 +64,10 @@ class GoldenTemplate:
         return bubbles
 
     def _auto_detect_answers(self, image: np.ndarray):
-        """对黄金模板自身采样暗度，自动识别标准答案"""
+        """对黄金模板自身采样暗度，自动识别标准答案
+        2026-06-04 重构: 改用 _classify_answer 静态方法(支持 multi),避免老逻辑漏判多选
+        原 OMR0026 Q1 真填涂 AC,但老逻辑 best_delta<9 直接返回 A(丢 C)
+        """
         if image is None:
             return
 
@@ -74,36 +85,21 @@ class GoldenTemplate:
         self._debug_samples = []  # 存储每题的采样详情
         for q, opts in q_groups.items():
             sorted_opts = sorted(opts.items(), key=lambda x: x[1])
-            if len(sorted_opts) < 2:
-                self.answers[q] = sorted_opts[0][0] if sorted_opts else None
-                continue
 
-            best_opt, best_val = sorted_opts[0]
-            second_val = sorted_opts[1][1]
-            all_vals = [v for _, v in sorted_opts]
-            mean_val = sum(all_vals) / len(all_vals)
+            # 2026-06-04 改用 _classify_answer 统一识别(支持 multi + 浅填涂 + 各种边界)
+            classification = self._classify_answer(sorted_opts)
+            ans = classification["answer"]
 
-            # 相对阈值：基于本题内部各选项的相对暗度，适应不同扫描亮度
-            other_mean = sum(v for _, v in sorted_opts[1:]) / (len(sorted_opts) - 1)
-            best_delta = other_mean - best_val    # best 比其他选项均值暗多少
-            gap = second_val - best_val
-            range_val = sorted_opts[-1][1] - sorted_opts[0][1]
-            gap_ratio = gap / max(range_val, 10)
-            best_vs_brightest = sorted_opts[-1][1] - best_val
+            # uncertain 时回退 None,让用户在 Tab1 人工修正
+            if classification["status"] == "uncertain":
+                ans = None
 
-            # 防线1: 全部偏亮且接近且最暗项也不暗 → 未填涂
-            # best_val>210 防止浅填涂（如205）被误判为空题
-            if mean_val > 200 and range_val < 30 and best_val > 210 and best_delta < 8:
-                self.answers[q] = None
-            elif best_delta > 9 and (gap > 2 or gap_ratio > 0.06 or best_vs_brightest > 15):
-                self.answers[q] = best_opt  # best 明显暗于其他 → 选中
-            # 防线3b: 浅填涂/阴影区域兼容，降低 best_delta 和 best_val 门槛
-            elif best_delta > 6 and gap > 0 and (best_val < 210 or mean_val < 215):
-                self.answers[q] = best_opt
-            else:
-                self.answers[q] = None  # 模糊
+            self.answers[q] = ans
 
-            # 收集调试信息
+            # 收集调试信息(原样保留,方便 Tab1 显示采样值)
+            best_opt, best_val = sorted_opts[0] if sorted_opts else ("?", 255)
+            gap = sorted_opts[1][1] - best_val if len(sorted_opts) > 1 else 0
+            mean_val = sum(v for _, v in sorted_opts) / len(sorted_opts) if sorted_opts else 0
             self._debug_samples.append({
                 "q": q, "answer": self.answers[q],
                 "best_opt": best_opt, "best_val": round(best_val, 1),
@@ -144,8 +140,12 @@ class GoldenTemplate:
         """采样气泡中心暗度。小窗口聚焦圆心（避开印刷轮廓圈），返回均值灰度。"""
         cx, cy = bx, by
         if auto_tune:
-            # 极小范围搜索：仅气泡中心15%区域，确保永远不触达轮廓圈
-            tune_r = max(3, int(min(bw, bh) * 0.15))
+            # 2026-06-04 优化: 15%→40%→60%
+            # 解决"填涂轻微偏移时校准采样点漂到框线上"问题
+            # (OMR0007 数学卷 Q2:C 灰度 143→186 误判 uncertain 即此问题)
+            # 60% 半径(对 w=12 气泡=7px)远小于列中心距的一半(数学卷 ~21px,政治卷 ~38px),不会跨列
+            # 60% 覆盖了 ECC 对齐后填涂中心可能偏移 ±5px 的边界 case
+            tune_r = max(2, int(min(bw, bh) * 0.60))
             tx1 = max(0, cx - tune_r)
             ty1 = max(0, cy - tune_r)
             tx2 = min(img_w, cx + tune_r)
@@ -221,6 +221,8 @@ class GoldenTemplate:
         - 防线1 best_delta 阈值: 8 → 4
         - 旧阈值会把 Q16 这类"纸张亮 + 浅填涂 + best_delta≈6"误判为 empty
         - 新阈值让 borderline case 落到 uncertain,进人工核对面板
+        - 2026-06-04 加固: 防线3/3b 加 best_val 绝对暗度门槛,防止印刷线/伪影
+          被判为单选(空卷误识别 30% → 0%)
         """
         if not sorted_opts:
             return {"answer": None, "status": "empty"}
@@ -235,28 +237,39 @@ class GoldenTemplate:
         gap = second_val - best_val
         mean_val = sum(all_vals) / len(all_vals)
         range_val = sorted_opts[-1][1] - sorted_opts[0][1]
-        best_vs_brightest = sorted_opts[-1][1] - best_val
 
         # 多涂检测: 相对(明显低于其他均值)或 绝对(多个极暗)双保险
         dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 150)
         abs_dark = sum(1 for v in all_vals if v < 140)  # 处理全体偏暗的极端情况
         # 收集所有填涂的选项(用于多选题显示),与上方检测口径一致
         dark_opts = sorted([o for o, v in sorted_opts if (other_mean - v > 24 and v < 150) or v < 140])
+        # 空白信号分两层:
+        # - weak_white (>248):  灰度>248,用于防线3b 降低门槛
+        # - strong_white (>=254): 真正接近纯白,用于防线1 豁免 + 防线3b 极浅填涂识别
+        white_count = sum(1 for v in all_vals if v > 248)
+        strong_white = sum(1 for v in all_vals if v >= 254)
 
         # 防线1: 全部偏亮且接近且最暗项也不暗(且无明显填涂信号) → 未填涂
         # 收紧 best_delta 阈值 8→4: 防止浅填涂(best_val>210)被误判为空题
-        if mean_val > 200 and range_val < 30 and best_val > 210 and best_delta < 4:
+        # 例外: ≥2 个其他选项是真正纯白(>=254)时,允许 best 略有差异(2+)不判 empty
+        if (mean_val > 200 and range_val < 30 and best_val > 210 and best_delta < 4
+                and not (strong_white >= 2 and best_delta > 2)):
             return {"answer": None, "status": "empty"}
         # 防线2: 两个以上暗 → 多选
-        # gap>30 说明最佳选项明显独占,即使 dark_count>=2 也不判多选
+        # 2026-06-04 调整 gap 阈值 30→40: 覆盖 "C+D 双重填涂但 D 偏深 C 偏浅" 的边界 case
+        # (OMR0013 21A Q12:D=110 C=142 gap=32, 旧阈值会漏判多选)
         # abs_dark 仅在整体偏暗时(mean<130)启用,避免正常亮度下误判
-        elif (dark_count >= 2 and gap <= 30) or (abs_dark >= 2 and gap <= 20 and mean_val < 130):
+        elif (dark_count >= 2 and gap <= 40) or (abs_dark >= 2 and gap <= 20 and mean_val < 130):
             return {"answer": "".join(dark_opts) if dark_opts else best_opt, "status": "multi"}
-        # 防线3: best 明显暗于其他 → 选中
-        elif best_delta > 9 and (gap > 2 or best_vs_brightest > 15):
-            return {"answer": best_opt, "status": "single"}
-        # 防线3b: 浅填涂/阴影区域兼容,降低 best_delta 和 best_val 门槛
-        elif best_delta > 6 and gap > 1 and (best_val < 210 or mean_val < 215):
+        # 防线3 统一规则 (2026-06-04 合并原防线3 + 防线3b 分支1):
+        # 核心: best_delta > 12 + gap > 5 (相对暗度+集中度,挡住印刷线/扫描噪声)
+        # 兜底: best_val < 200 + range_val > 15 (整体有真实填涂才能形成大range)
+        # 原因: 之前 best_val<185→190→195 反复提仍挡不住 ECC 偏移后的浅填涂
+        # (14A Q11:B=193, 03A Q1:C=189), 改靠 delta+gap 把关更鲁棒
+        if (best_val < 215
+                and best_delta > 12
+                and gap > 5
+                and range_val > 15):
             return {"answer": best_opt, "status": "single"}
         # 模糊
         else:
