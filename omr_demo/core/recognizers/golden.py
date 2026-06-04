@@ -69,12 +69,12 @@ class GoldenTemplateRecognizer:
             recognizer_id=self.id,
         )
 
-    # ========== 阶段 1 暂不纳入协议的"黄金模板特有"能力 ==========
+    # ========== 黄金模板特有能力(暂不纳入 Recognizer 协议) ==========
 
     @property
     def golden_template(self):
         """暴露原始 GoldenTemplate 引用,供 Tab2 预览图生成使用(访问 .image/.bubbles)
 
-        阶段 7 交叉验证时再考虑把 visualize() 加到 Recognizer 协议。
+        未来若 visualize() 需要被多识别器复用,再考虑加到 Recognizer 协议。
         """
         return self._gtp

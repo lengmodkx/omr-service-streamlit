@@ -79,6 +79,65 @@ def test_grid_basic():
     check(q1a["h"] > 6, f"气泡高度应>6, 实际{q1a['h']}")
 
 
+def test_grid_reverse_q():
+    """T7.1: reverse_q=True 时 Q1 放在 y2 端(最下),Q_max 在 y1 端(最上)
+
+    用于 OMR0002 蒙文答题卡"题号倒序排列"场景
+    """
+    from core.golden_template import GoldenTemplate
+
+    config = {
+        "x1": 100, "y1": 200, "x2": 400, "y2": 700,
+        "start_q": 1, "num_q": 5, "num_options": 4,
+        "reverse_q": True,
+    }
+    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    bubbles = gtp._generate_grid(config)
+
+    row_h = (700 - 200) / 5  # 100
+
+    # Q1 应在 y2 端(最下): cy = y2 - row_h/2 = 700 - 50 = 650
+    q1 = next(b for b in bubbles if b["q"] == 1 and b["opt"] == "A")
+    expected_q1_cy = int(700 - row_h / 2)  # 650
+    check(abs(q1["y"] - expected_q1_cy) <= 1,
+          f"reverse_q=True: Q1 y 应在 y2 端(最下)≈{expected_q1_cy}，实际{q1['y']}")
+
+    # Q5 应在 y1 端(最上): cy = y1 + row_h/2 = 200 + 50 = 250
+    q5 = next(b for b in bubbles if b["q"] == 5 and b["opt"] == "A")
+    expected_q5_cy = int(200 + row_h / 2)  # 250
+    check(abs(q5["y"] - expected_q5_cy) <= 1,
+          f"reverse_q=True: Q5 y 应在 y1 端(最上)≈{expected_q5_cy}，实际{q5['y']}")
+
+    # 倒序时 Q1 和 Q5 的 y 位置应交换
+    config_normal = {**config, "reverse_q": False}
+    bubbles_normal = gtp._generate_grid(config_normal)
+    q1_normal = next(b for b in bubbles_normal if b["q"] == 1 and b["opt"] == "A")
+    check(abs(q1["y"] - q1_normal["y"]) > 100,
+          f"reverse_q=True 时 Q1.y({q1['y']}) 应远离 normal Q1.y({q1_normal['y']})")
+
+
+def test_grid_reverse_q_default_false():
+    """T7.2: 不传 reverse_q 时默认 False(向后兼容)
+
+    现有模板 JSON 没有 reverse_q 字段,必须默认正常排序
+    """
+    from core.golden_template import GoldenTemplate
+
+    config = {
+        "x1": 100, "y1": 200, "x2": 400, "y2": 700,
+        "start_q": 1, "num_q": 5, "num_options": 4,
+        # 注意: 没有 reverse_q 字段
+    }
+    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    bubbles = gtp._generate_grid(config)
+
+    row_h = (700 - 200) / 5
+    q1 = next(b for b in bubbles if b["q"] == 1 and b["opt"] == "A")
+    expected_q1_cy = int(200 + row_h / 2)  # 250 (顶部)
+    check(abs(q1["y"] - expected_q1_cy) <= 1,
+          f"默认 reverse_q=False: Q1 y 应在 y1 端(最上)≈{expected_q1_cy}，实际{q1['y']}")
+
+
 def test_grid_three_options():
     """3选项版面（常见于物理/化学选择题只有ABC三个选项）"""
     from core.golden_template import GoldenTemplate
@@ -248,9 +307,10 @@ def test_judge_multi_fill():
     gtp.answers = {}
     gtp.image = np.ones((300, 400, 3), dtype=np.uint8) * 235
 
+    # 2026-06-04: 缩小 circle radius 10→5,让 30%采样窗口内不会被高斯模糊拉成"暗但不极端"
     img = make_synthetic_roi(dark_spots=[
-        (50, 150, 10, 120),   # A填涂
-        (130, 150, 10, 135),  # B也填涂
+        (50, 150, 5, 80),   # A填涂(真暗)
+        (130, 150, 5, 90),  # B也填涂
     ])
     img = cv2.GaussianBlur(img, (5, 5), 0)
     img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -296,11 +356,12 @@ def test_judge_all_black():
     gtp.answers = {}
     gtp.image = np.ones((300, 400, 3), dtype=np.uint8) * 235
 
+    # 2026-06-04: radius 10→5, 灰度 120→80, 模拟"真全涂黑"(绝对暗 < 130)
     img = make_synthetic_roi(dark_spots=[
-        (50, 150, 10, 120),
-        (130, 150, 10, 125),
-        (210, 150, 10, 130),
-        (290, 150, 10, 128),
+        (50, 150, 5, 80),
+        (130, 150, 5, 85),
+        (210, 150, 5, 90),
+        (290, 150, 5, 88),
     ])
     img = cv2.GaussianBlur(img, (5, 5), 0)
     img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -323,11 +384,11 @@ def test_card_flag_abnormal():
             gtp.bubbles.append({"q": qi + 1, "opt": opt, "x": 50 + oi*80, "y": 50 + qi*100, "w": 16, "h": 16})
     gtp.image = np.ones((600, 400, 3), dtype=np.uint8) * 235
 
-    # 5题全部涂黑
+    # 5题全部涂黑(radius 10→5, 灰度 120→80, 模拟真全涂黑)
     dark_spots = []
     for qi in range(5):
         for oi in range(4):
-            dark_spots.append((50 + oi*80, 50 + qi*100, 10, 120))
+            dark_spots.append((50 + oi*80, 50 + qi*100, 5, 80))
     img = make_synthetic_roi(400, 600, dark_spots)
     img = cv2.GaussianBlur(img, (5, 5), 0)
     img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
@@ -451,10 +512,11 @@ def test_classify_q16_real_borderline():
 
 
 def test_classify_q11_real_borderline():
-    """T6.2: Q11 真实数据 — best_val<210(best=204)→ 防线1 不触发 → uncertain
+    """T6.2: Q11 真实数据 — best_delta=5.6 < 12, gap=3.7 < 5 → uncertain
 
     数据来源: 2026 届高三日语答题卡 Q11 debug 输出
-    旧/新行为一致: best_val=204 < 210 → 防线1 不触发 → 落到 uncertain
+    行为: best_val=204 < 215 但 best_delta=5.6 < 12 (新规则门槛)
+          且 gap=3.7 < 5 → 不满足防线3统一规则 → uncertain
     """
     from core.golden_template import GoldenTemplate
 
@@ -462,7 +524,9 @@ def test_classify_q11_real_borderline():
     r = GoldenTemplate._classify_answer(q11)
 
     check(r["status"] == "uncertain",
-          f"Q11 真实数据(best=204.4)应 uncertain，实际 {r['status']}")
+          f"Q11 真实数据(best=204.4, delta=5.6)应 uncertain，实际 {r['status']}")
+    check(r["answer"] is None,
+          f"Q11 uncertain 时 answer 应为 None，实际 {r['answer']}")
 
 
 def test_classify_clear_empty():

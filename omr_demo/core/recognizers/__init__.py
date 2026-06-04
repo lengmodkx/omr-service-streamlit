@@ -3,14 +3,15 @@
 
 各适配器职责:
 - golden.py: 包装 GoldenTemplate.recognize()(薄包装,补齐 duration_ms / recognizer_id)
-- differential.py: 包装 CardProcessor.recognize_choices()(重整输出结构)
 
 包装而非重写:
 - 不修改被包装类的内部逻辑
 - 0 回归风险
-- 阶段 5 之后可逐步迁移内部实现到协议
+
+历史:
+- 2026-06-04: 移除 DifferentialRecognizer(差分法适配器)
+  阶段 7 双识别器交叉验证被废弃,Tab3 改用单识别器 + 人工核对兜底
 """
 from core.recognizers.golden import GoldenTemplateRecognizer
-from core.recognizers.differential import DifferentialRecognizer
 
-__all__ = ["GoldenTemplateRecognizer", "DifferentialRecognizer"]
+__all__ = ["GoldenTemplateRecognizer"]
