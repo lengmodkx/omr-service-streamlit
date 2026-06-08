@@ -43,3 +43,10 @@ output/
 # OS
 .DS_Store
 Thumbs.db
+
+# Tool / session artifacts (Claude / CodeGraph / Cursor / YOLO training output)
+.claude/
+.codegraph/
+.cursor/
+.tmp/
+runs/
