@@ -454,7 +454,7 @@ with tab1:
 
             configs = []
             for i, box in enumerate(boxes):
-                cols = st.columns([1, 1, 1, 1, 1])
+                cols = st.columns([1, 1, 1, 1, 1.1, 1.5])
                 with cols[0]:
                     sq = st.number_input("起始题号", min_value=1, value=i * 5 + 1, key=f"gc_sq_{i}")
                 with cols[1]:
@@ -468,14 +468,26 @@ with tab1:
                 with cols[3]:
                     # 2026-06-04 新增: 倒序题号选项(用于 OMR0002 蒙文答题卡等倒序排列模板)
                     rv = st.checkbox("倒序", value=False, key=f"gc_rv_{i}",
-                                     help="勾选时 Q1 放在 y2 端(最下),Q_max 在 y1 端(最上)。用于蒙文答题卡'题号倒序排列'场景")
+                                     help="勾选时 Q1 放在题号轴末端(x轴→x2端,y轴→y2端)。配合'选项纵向'使用,适配蒙文答题卡")
                 with cols[4]:
+                    # 2026-06-08 新增: 选项轴方向
+                    # x (默认): ABCD 横排,题号竖排 (标准模板)
+                    # y:        ABCD 竖排,题号横排 (OMR0002 蒙文答题卡)
+                    oa = st.selectbox(
+                        "选项轴",
+                        options=["x", "y"],
+                        index=0,
+                        key=f"gc_oa_{i}",
+                        help="x: ABCD 横向、题号纵向(标准);y: ABCD 纵向、题号横向(OMR0002 蒙文答题卡)",
+                    )
+                with cols[5]:
                     st.caption(f"框: ({box['x1']},{box['y1']})-({box['x2']},{box['y2']})")
                 configs.append({
                     "x1": box["x1"], "y1": box["y1"],
                     "x2": box["x2"], "y2": box["y2"],
                     "start_q": int(sq), "num_q": int(nq), "num_options": int(no),
                     "reverse_q": bool(rv),  # 2026-06-04 新增
+                    "option_axis": oa,  # 2026-06-08 新增
                 })
             st.session_state.golden_column_configs = configs
 
@@ -551,14 +563,23 @@ with tab1:
         # 预览气泡覆盖
         with st.expander("查看气泡覆盖预览"):
             vis = gimg.copy()
-            # 画列框边界和内部网格线
+            # 画列框边界和内部网格线(2026-06-08 适配 option_axis)
             for cfg in st.session_state.golden_column_configs:
                 x1, y1, x2, y2 = cfg["x1"], cfg["y1"], cfg["x2"], cfg["y2"]
+                option_axis = cfg.get("option_axis", "x")
                 cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                row_h = (y2 - y1) / cfg["num_q"]
-                for qi in range(1, cfg["num_q"]):
-                    ly = int(y1 + qi * row_h)
-                    cv2.line(vis, (x1, ly), (x2, ly), (0, 255, 255), 1)
+                if option_axis == "x":
+                    # 标准:题号在 y 方向,画水平分隔线
+                    row_h = (y2 - y1) / cfg["num_q"]
+                    for qi in range(1, cfg["num_q"]):
+                        ly = int(y1 + qi * row_h)
+                        cv2.line(vis, (x1, ly), (x2, ly), (0, 255, 255), 1)
+                else:
+                    # 横排题:题号在 x 方向,画垂直分隔线
+                    col_w = (x2 - x1) / cfg["num_q"]
+                    for qi in range(1, cfg["num_q"]):
+                        lx = int(x1 + qi * col_w)
+                        cv2.line(vis, (lx, y1), (lx, y2), (0, 255, 255), 1)
             # 画气泡采样点
             for b in gtp.bubbles:
                 cv2.circle(vis, (b["x"], b["y"]), max(4, b["w"] // 2), (0, 255, 0), 2)
@@ -710,12 +731,19 @@ with tab2:
                                             if ans.get("answer") is not None)
                     r["_is_blank"] = identified_count == 0 and total_q > 0
 
-                    # 全卷异常检测: 识别出 ≥3 题但正确率 < 10% → 极可能是白卷/扫描异常
+                    # 全卷异常检测: 识别率 < 30% 且已识别题正确率 < 10% → 极可能是白卷/扫描异常
                     # 防御"空白卷+扫描噪声 → 误识别为 single"的场景
                     # 此时把"识别错"的答案降级为 uncertain (让人工核对),并判白卷
+                    # 2026-06-08 调整: 旧条件"识别出 ≥3 题但正确率 < 10%"会误伤"故意错填"的卡
+                    # 如 OMR0002 19A: 10 题都识别为 single 但答案和 gold 完全不同(可能故意错填),
+                    # 旧逻辑会把它降级为白卷+10 题全 uncertain,用户看不到 19A 的真实填涂。
+                    # 新条件加识别率门槛(< 30%),放过"全题都识别但全错"的卡,只对"几乎没识别出来"
+                    # 的扫描异常卡降级
                     correct_count = sum(1 for ans in r["answers"].values()
                                         if ans.get("correct") is True)
-                    if total_q >= 3 and identified_count >= 3 and correct_count / identified_count < 0.1:
+                    if (total_q >= 3 and identified_count > 0
+                            and identified_count < total_q * 0.3
+                            and correct_count / identified_count < 0.1):
                         for ans in r["answers"].values():
                             if ans.get("answer") is not None and ans.get("correct") is not True:
                                 ans["status"] = "uncertain"

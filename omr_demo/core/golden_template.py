@@ -28,9 +28,14 @@ class GoldenTemplate:
     def _generate_grid(cfg: Dict) -> List[Dict]:
         """根据列框配置均匀切分，返回该列所有气泡坐标
 
-        2026-06-04 新增 reverse_q: 倒序题号
-        True → Q1 在 y2 端（最下）, Q_max 在 y1 端（最上）
-        用于 OMR0002 蒙文答题卡"题号倒序排列"场景
+        option_axis (2026-06-08 新增):
+        - "x" (默认): 选项在 x 轴、题号在 y 轴 —— 标准"竖排题"模板
+        - "y":        选项在 y 轴、题号在 x 轴 —— OMR0002 蒙文答题卡等"横排题"模板
+                       (用户画的列框是扁宽的,题号 Q1/Q2/... 从左到右,选项 A/B/... 从上到下)
+
+        reverse_q (2026-06-04 新增):
+        - True: Q1 放在题号轴末端 (option_axis="x" → y2 端; option_axis="y" → x2 端)
+        - False (默认): Q1 放在题号轴起点
         """
         x1, y1 = cfg["x1"], cfg["y1"]
         x2, y2 = cfg["x2"], cfg["y2"]
@@ -38,29 +43,63 @@ class GoldenTemplate:
         num_q = cfg["num_q"]
         num_options = cfg["num_options"]
         reverse_q = cfg.get("reverse_q", False)  # 2026-06-04 新增
+        option_axis = cfg.get("option_axis", "x")  # 2026-06-08 新增
 
-        col_w = (x2 - x1) / num_options
-        row_h = (y2 - y1) / num_q
-        bubble_w = max(8, int(col_w * 0.5))
-        bubble_h = max(8, int(row_h * 0.5))
+        if option_axis == "x":
+            # 标准:选项在 x 轴、题号在 y 轴
+            col_w = (x2 - x1) / num_options
+            row_h = (y2 - y1) / num_q
+            bubble_w = max(8, int(col_w * 0.5))
+            bubble_h = max(8, int(row_h * 0.5))
+            strict_axis = "y"  # 题目轴是 y,校准严格(防被相邻题号/印刷线吸走)
 
-        bubbles = []
-        for qi in range(num_q):
-            qn = start_q + qi
-            # 倒序时: qi=0 (Q1) 在 y2 端(最下), qi=last 在 y1 端(最上)
-            row_idx = (num_q - 1 - qi) if reverse_q else qi
-            cy = int(y1 + row_idx * row_h + row_h / 2)
+            bubbles = []
+            for qi in range(num_q):
+                qn = start_q + qi
+                # 倒序时: qi=0 (Q1) 在 y2 端(最下), qi=last 在 y1 端(最上)
+                row_idx = (num_q - 1 - qi) if reverse_q else qi
+                cy = int(y1 + row_idx * row_h + row_h / 2)
+                for oi in range(num_options):
+                    opt = chr(ord("A") + oi)
+                    cx = int(x1 + oi * col_w + col_w / 2)
+                    bubbles.append({
+                        "q": qn,
+                        "opt": opt,
+                        "x": cx,
+                        "y": cy,
+                        "w": bubble_w,
+                        "h": bubble_h,
+                        "_strict_axis": strict_axis,
+                    })
+        else:  # option_axis == "y"
+            # 横排题:选项在 y 轴、题号在 x 轴
+            # x 轴被 num_q 切分 → 每列一个问题
+            # y 轴被 num_options 切分 → 每行一个选项
+            col_w = (x2 - x1) / num_q
+            row_h = (y2 - y1) / num_options
+            bubble_w = max(8, int(col_w * 0.5))
+            bubble_h = max(8, int(row_h * 0.5))
+            strict_axis = "x"  # 题目轴是 x,校准严格(防被相邻列题号/印刷线吸走)
+
+            bubbles = []
             for oi in range(num_options):
                 opt = chr(ord("A") + oi)
-                cx = int(x1 + oi * col_w + col_w / 2)
-                bubbles.append({
-                    "q": qn,
-                    "opt": opt,
-                    "x": cx,
-                    "y": cy,
-                    "w": bubble_w,
-                    "h": bubble_h,
-                })
+                # 选项始终 A 在最上、D 在最下(不因 reverse_q 翻转,否则 ABCD 排错)
+                cy = int(y1 + oi * row_h + row_h / 2)
+                for qi in range(num_q):
+                    qn = start_q + qi
+                    # 倒序时: qi=0 (Q1) 在 x2 端(最右), qi=last 在 x1 端(最左)
+                    col_idx = (num_q - 1 - qi) if reverse_q else qi
+                    cx = int(x1 + col_idx * col_w + col_w / 2)
+                    bubbles.append({
+                        "q": qn,
+                        "opt": opt,
+                        "x": cx,
+                        "y": cy,
+                        "w": bubble_w,
+                        "h": bubble_h,
+                        "_strict_axis": strict_axis,
+                    })
         return bubbles
 
     def _auto_detect_answers(self, image: np.ndarray):
@@ -109,28 +148,42 @@ class GoldenTemplate:
 
     def _calibrate_positions(self, image: np.ndarray):
         """局部搜索校准：在初始网格位置附近搜索最暗点，修正到真实气泡圆心。
-        限制 y 方向偏移不超过 3px，防止被上下方的题号、印刷线或相邻行吸引。"""
+        题目轴方向严格（±2px），防止被相邻题号/印刷线吸走；
+        选项轴方向宽松（±25% 半径），允许修正选项列偏移。
+        2026-06-08 改造:严格轴随 option_axis 切换(默认 y,横排题时切到 x)。
+        """
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         h, w = gray.shape
 
         for b in self.bubbles:
-            # 水平方向：正常搜索，修正选项列偏移
-            search_r_x = max(3, int(min(b["w"], b["h"]) * 0.25))
-            # 垂直方向：严格限制，防止被题号或相邻行吸走
-            search_r_y = 2
-            x1 = max(0, b["x"] - search_r_x)
-            y1 = max(0, b["y"] - search_r_y)
-            x2 = min(w, b["x"] + search_r_x)
-            y2 = min(h, b["y"] + search_r_y)
+            strict_axis = b.get("_strict_axis", "y")  # 默认 y 严格(老模板兼容)
+            r_loose = max(3, int(min(b["w"], b["h"]) * 0.25))
+            r_strict = 2
+            if strict_axis == "y":
+                sx, sy = r_loose, r_strict
+            else:  # strict_axis == "x"
+                sx, sy = r_strict, r_loose
+
+            x1 = max(0, b["x"] - sx)
+            y1 = max(0, b["y"] - sy)
+            x2 = min(w, b["x"] + sx)
+            y2 = min(h, b["y"] + sy)
             roi = blurred[y1:y2, x1:x2]
             if roi.size == 0:
                 continue
             _, _, min_loc, _ = cv2.minMaxLoc(roi)
-            b["x"] = x1 + min_loc[0]
-            # y 方向只允许 ±2px 微调，拒绝大幅偏移
+            new_x = x1 + min_loc[0]
             new_y = y1 + min_loc[1]
-            if abs(new_y - b["y"]) <= 3:
+
+            # 题目轴（严格）只允许 ±2px 微调；选项轴（宽松）自由调整
+            if strict_axis == "y":
+                b["x"] = new_x
+                if abs(new_y - b["y"]) <= 3:
+                    b["y"] = new_y
+            else:
+                if abs(new_x - b["x"]) <= 3:
+                    b["x"] = new_x
                 b["y"] = new_y
 
     @staticmethod
@@ -239,10 +292,13 @@ class GoldenTemplate:
         range_val = sorted_opts[-1][1] - sorted_opts[0][1]
 
         # 多涂检测: 相对(明显低于其他均值)或 绝对(多个极暗)双保险
-        dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 150)
-        abs_dark = sum(1 for v in all_vals if v < 140)  # 处理全体偏暗的极端情况
+        # 2026-06-08 放宽: 150→170 / 140→160
+        # 修复 OMR0002 14A Q9 真实多涂(A=156, C=159)被旧阈值漏判
+        # 旧阈值 v<150 让两个 156/159 都被排掉,导致 dark_count=0 落到防线3 误判 single
+        dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 170)
+        abs_dark = sum(1 for v in all_vals if v < 160)  # 处理全体偏暗的极端情况
         # 收集所有填涂的选项(用于多选题显示),与上方检测口径一致
-        dark_opts = sorted([o for o, v in sorted_opts if (other_mean - v > 24 and v < 150) or v < 140])
+        dark_opts = sorted([o for o, v in sorted_opts if (other_mean - v > 24 and v < 170) or v < 160])
         # 空白信号: ≥2 个其他选项是真正纯白(>=254)时,允许 best 略有差异不判 empty
         # 用于防线1 豁免,避免"大部分选项 248~252,best=240"的浅填涂被误判为空
         strong_white = sum(1 for v in all_vals if v >= 254)
@@ -250,7 +306,12 @@ class GoldenTemplate:
         # 防线1: 全部偏亮且接近且最暗项也不暗(且无明显填涂信号) → 未填涂
         # 收紧 best_delta 阈值 8→4: 防止浅填涂(best_val>210)被误判为空题
         # 例外: ≥2 个其他选项是真正纯白(>=254)时,允许 best 略有差异(2+)不判 empty
-        if (mean_val > 200 and range_val < 30 and best_val > 210 and best_delta < 4
+        # 2026-06-08 加固: best_val > 200 时,放宽 best_delta 阈值 4→15
+        # 修复 OMR0002 11A/12A 空卷误识: ECC 偏后 best_val=206 触发防线3 误判 single
+        # 逻辑: 真填涂 best_val 都 < 200(暗),空卷 best_val > 200(亮),best_val > 200 时
+        #       即便 best_delta 达 12-15 也只是题号印刷线/扫描噪声,应判 empty
+        if (mean_val > 200 and range_val < 30 and best_val > 200
+                and ((best_val > 210 and best_delta < 4) or (best_val <= 210 and best_delta < 15))
                 and not (strong_white >= 2 and best_delta > 2)):
             return {"answer": None, "status": "empty"}
         # 防线2: 两个以上暗 → 多选
