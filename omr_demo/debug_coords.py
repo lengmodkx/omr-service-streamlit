@@ -1,10 +1,10 @@
 """
-紧急诊断：输出黄金模板所有气泡的坐标，检查是否有坐标重合
+紧急诊断：输出标准模板所有气泡的坐标，检查是否有坐标重合
 """
 import sys
 sys.path.insert(0, ".")
 import cv2
-from core.golden_template import GoldenTemplate
+from core.standard_template import StandardTemplate
 
 
 def diagnose_coords(image_path, column_configs):
@@ -13,7 +13,7 @@ def diagnose_coords(image_path, column_configs):
         print(f"无法读取: {image_path}")
         return
 
-    gtp = GoldenTemplate(img, column_configs)
+    stp = StandardTemplate(img, column_configs)
     h, w = img.shape[:2]
 
     print("=" * 80)
@@ -22,7 +22,7 @@ def diagnose_coords(image_path, column_configs):
 
     # 按题号分组
     q_bubbles = {}
-    for b in gtp.bubbles:
+    for b in stp.bubbles:
         q_bubbles.setdefault(b["q"], []).append(b)
 
     issues = []

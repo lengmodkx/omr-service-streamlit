@@ -1,5 +1,5 @@
 """
-性能对比：processor.py (原有方法) vs golden_template.py (新方法)
+性能对比：processor.py (原有方法) vs standard_template.py (新方法)
 """
 import sys
 sys.path.insert(0, ".")
@@ -7,7 +7,7 @@ import time
 import cv2
 import numpy as np
 from core.processor import CardProcessor
-from core.golden_template import GoldenTemplate
+from core.standard_template import StandardTemplate
 
 
 def benchmark_processor(img_path, blank_path=None):
@@ -36,23 +36,23 @@ def benchmark_processor(img_path, blank_path=None):
     return {"time_ms": avg_time, "result": result}
 
 
-def benchmark_golden(img_path, column_configs):
-    """测试黄金模板法"""
+def benchmark_standard(img_path, column_configs):
+    """测试标准模板法"""
     img = cv2.imread(img_path, cv2.IMREAD_COLOR)
     if img is None:
         print(f"无法读取: {img_path}")
         return None
 
-    # 用同一张图作为黄金模板（仅用于速度测试，实际应使用正确填涂卡）
-    gtp = GoldenTemplate(img, column_configs)
+    # 用同一张图作为标准模板（仅用于速度测试，实际应使用正确填涂卡）
+    stp = StandardTemplate(img, column_configs)
 
     # 预热
-    _ = gtp.recognize(img)
+    _ = stp.recognize(img)
 
     times = []
     for _ in range(5):
         t0 = time.perf_counter()
-        result = gtp.recognize(img)
+        result = stp.recognize(img)
         t1 = time.perf_counter()
         times.append(t1 - t0)
 
@@ -146,10 +146,10 @@ if __name__ == "__main__":
         print(f"  总题数: {total}")
         print(f"  已识别: {recognized}  空白: {empty}  多涂: {multi}")
 
-    # 2. 黄金模板法
-    print("\n[2] 黄金模板法 (GoldenTemplate)")
+    # 2. 标准模板法
+    print("\n[2] 标准模板法 (StandardTemplate)")
     configs = build_configs_from_english_json()
-    r2 = benchmark_golden(test_img, configs)
+    r2 = benchmark_standard(test_img, configs)
     if r2:
         print(f"  平均耗时: {r2['time_ms']:.2f} ms")
         s = r2["stats"]
@@ -164,5 +164,5 @@ if __name__ == "__main__":
     print("=" * 60)
     if r1 and r2:
         speedup = r1["time_ms"] / r2["time_ms"]
-        print(f"  速度比: processor / golden = {speedup:.2f}x")
-        print(f"  (golden 法因包含 ECC 对齐，通常更慢，但识别率更高)")
+        print(f"  速度比: processor / standard = {speedup:.2f}x")
+        print(f"  (标准模板法因包含 ECC 对齐，通常更慢，但识别率更高)")

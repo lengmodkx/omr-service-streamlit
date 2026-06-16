@@ -33,7 +33,7 @@ from core.recognizer import (
     make_recognizer,
     list_recognizer_ids,
 )
-from core.recognizers.golden import GoldenTemplateRecognizer
+from core.recognizers.standard import StandardTemplateRecognizer
 
 PASSED = 0
 FAILED = 0
@@ -52,46 +52,46 @@ def check(condition, msg):
 # ========== 1. 协议一致性 (3 例) ==========
 
 def test_recognizer_protocol_conformance():
-    """golden 适配器通过 isinstance(rec, Recognizer) 检查"""
-    golden = GoldenTemplateRecognizer(golden_template=None)
-    check(isinstance(golden, Recognizer), "GoldenTemplateRecognizer is Recognizer")
+    """standard 适配器通过 isinstance(rec, Recognizer) 检查"""
+    rec = StandardTemplateRecognizer(standard_template=None)
+    check(isinstance(rec, Recognizer), "StandardTemplateRecognizer is Recognizer")
 
 
 def test_can_handle_returns_bool():
     """can_handle 永远返回 bool,不抛异常"""
-    golden = GoldenTemplateRecognizer(golden_template=None)
+    rec = StandardTemplateRecognizer(standard_template=None)
     ctx = RecognizeContext()
-    check(golden.can_handle(ctx) is False, "golden None template -> False (bool)")
+    check(rec.can_handle(ctx) is False, "standard None template -> False (bool)")
     # True 情况:用 mock 构造有内容的环境
-    gtp_mock = MagicMock()
-    gtp_mock.bubbles = [{"q": 1, "opt": "A"}]
-    golden2 = GoldenTemplateRecognizer(gtp_mock)
-    check(golden2.can_handle(ctx) is True, "golden with bubbles -> True (bool)")
+    stp_mock = MagicMock()
+    stp_mock.bubbles = [{"q": 1, "opt": "A"}]
+    rec2 = StandardTemplateRecognizer(stp_mock)
+    check(rec2.can_handle(ctx) is True, "standard with bubbles -> True (bool)")
 
 
 def test_recognize_returns_dataclass():
     """recognize() 返回 RecognizeResult 实例"""
     # 用 mock 替换底层识别方法,只验证包装逻辑
-    gtp_mock = MagicMock()
-    gtp_mock.recognize.return_value = {
+    stp_mock = MagicMock()
+    stp_mock.recognize.return_value = {
         "answers": {1: {"answer": "A", "status": "single", "correct": None}},
         "total": 1, "empty_count": 0, "multi_count": 0,
         "card_flag": None, "debug_lines": [],
     }
-    gtp_mock.bubbles = [{"q": 1, "opt": "A"}]
-    rec = GoldenTemplateRecognizer(gtp_mock)
+    stp_mock.bubbles = [{"q": 1, "opt": "A"}]
+    rec = StandardTemplateRecognizer(stp_mock)
     result = rec.recognize(np.zeros((100, 100, 3), dtype=np.uint8), RecognizeContext())
     check(isinstance(result, RecognizeResult), "recognize() returns RecognizeResult")
-    check(result.recognizer_id == "golden", "result.recognizer_id == 'golden'")
+    check(result.recognizer_id == "standard", "result.recognizer_id == 'standard'")
     check(result.duration_ms > 0, f"duration_ms > 0 (got {result.duration_ms})")
 
 
 def test_protocol_class_attributes():
     """协议类属性 (name/id/requires_blank) 都存在且类型正确"""
-    golden = GoldenTemplateRecognizer(golden_template=None)
-    check(isinstance(golden.name, str) and len(golden.name) > 0, "golden.name is non-empty str")
-    check(isinstance(golden.id, str) and golden.id == "golden", "golden.id == 'golden'")
-    check(golden.requires_blank is False, "golden.requires_blank == False")
+    rec = StandardTemplateRecognizer(standard_template=None)
+    check(isinstance(rec.name, str) and len(rec.name) > 0, "standard.name is non-empty str")
+    check(isinstance(rec.id, str) and rec.id == "standard", "standard.id == 'standard'")
+    check(rec.requires_blank is False, "standard.requires_blank == False")
 
 
 # ========== 2. 字段完备性 (3 例) ==========
@@ -124,7 +124,7 @@ def test_recognize_result_types():
         answers={1: {"answer": "A", "status": "single", "correct": None}},
         total=1, empty_count=0, multi_count=0,
         card_flag="abnormal", debug_lines=["line1"],
-        duration_ms=12.5, recognizer_id="golden"
+        duration_ms=12.5, recognizer_id="standard"
     )
     check(isinstance(r.answers, dict), "answers is dict")
     check(isinstance(r.total, int), "total is int")
@@ -137,31 +137,31 @@ def test_recognize_result_types():
 # ========== 3. 行为 (3 例) ==========
 
 def test_make_recognizer_factory():
-    """make_recognizer 工厂函数能正确构造 golden 适配器"""
-    gtp_mock = MagicMock()
-    gtp_mock.bubbles = [{"q": 1}]
-    g = make_recognizer("golden", golden_template=gtp_mock)
-    check(isinstance(g, GoldenTemplateRecognizer), "make_recognizer('golden') -> GoldenTemplateRecognizer")
+    """make_recognizer 工厂函数能正确构造 standard 适配器"""
+    stp_mock = MagicMock()
+    stp_mock.bubbles = [{"q": 1}]
+    g = make_recognizer("standard", standard_template=stp_mock)
+    check(isinstance(g, StandardTemplateRecognizer), "make_recognizer('standard') -> StandardTemplateRecognizer")
 
 
 def test_list_recognizer_ids():
     """list_recognizer_ids() 返回已注册 ID 列表(差分法已移除)"""
     ids = list_recognizer_ids()
-    check("golden" in ids, "list contains 'golden'")
+    check("standard" in ids, "list contains 'standard'")
     check("differential" not in ids, "list does NOT contain 'differential' (已废弃)")
     check(len(ids) == 1, f"list length == 1 (got {len(ids)})")
 
 
 def test_duration_ms_and_recognizer_id_from_recognize():
     """真实 recognize() 后,duration_ms > 0 且 recognizer_id 与 self.id 一致"""
-    gtp_mock = MagicMock()
-    gtp_mock.recognize.return_value = {
+    stp_mock = MagicMock()
+    stp_mock.recognize.return_value = {
         "answers": {1: {"answer": "A", "status": "single", "correct": True}},
         "total": 1, "empty_count": 0, "multi_count": 0,
         "card_flag": None, "debug_lines": ["test"],
     }
-    gtp_mock.bubbles = [{"q": 1}]
-    rec = GoldenTemplateRecognizer(gtp_mock)
+    stp_mock.bubbles = [{"q": 1}]
+    rec = StandardTemplateRecognizer(stp_mock)
     result = rec.recognize(np.zeros((100, 100, 3), dtype=np.uint8), RecognizeContext())
     check(result.duration_ms > 0, f"duration_ms > 0 (got {result.duration_ms})")
     check(result.recognizer_id == rec.id, f"recognizer_id matches self.id ({result.recognizer_id})")

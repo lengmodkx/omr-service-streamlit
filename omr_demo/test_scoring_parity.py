@@ -14,11 +14,11 @@ from core.score_calculator import calc_total_score, ScoringConfig
 
 # ========== 旧内联逻辑 (从 app.py:810-825 复制) ==========
 
-def old_calc_score(effective_answers, golden_ans):
+def old_calc_score(effective_answers, answer_key):
     """与改造前 app.py:810-825 完全一致的算分逻辑"""
     sc = 0
-    tot = len(golden_ans)
-    for q, std_ans in golden_ans.items():
+    tot = len(answer_key)
+    for q, std_ans in answer_key.items():
         final_ans = effective_answers.get(q, "")
         if final_ans:
             if len(std_ans) > 1:
@@ -32,7 +32,7 @@ def old_calc_score(effective_answers, golden_ans):
 # ========== 测试用例 ==========
 
 CASES = [
-    # (名称, effective_answers, golden_ans, 期望 sc, 期望 tot)
+    # (名称, effective_answers, answer_key, 期望 sc, 期望 tot)
     ("全对",
      {1: "A", 2: "B", 3: "C"}, {1: "A", 2: "B", 3: "C"}, 3, 3),
     ("全错",

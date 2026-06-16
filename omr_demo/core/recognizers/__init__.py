@@ -2,7 +2,7 @@
 识别器适配器包 — 把现有识别类包装为 Recognizer 协议
 
 各适配器职责:
-- golden.py: 包装 GoldenTemplate.recognize()(薄包装,补齐 duration_ms / recognizer_id)
+- standard.py: 包装 StandardTemplate.recognize()(薄包装,补齐 duration_ms / recognizer_id)
 
 包装而非重写:
 - 不修改被包装类的内部逻辑
@@ -12,6 +12,6 @@
 - 2026-06-04: 移除 DifferentialRecognizer(差分法适配器)
   阶段 7 双识别器交叉验证被废弃,Tab3 改用单识别器 + 人工核对兜底
 """
-from core.recognizers.golden import GoldenTemplateRecognizer
+from core.recognizers.standard import StandardTemplateRecognizer
 
-__all__ = ["GoldenTemplateRecognizer"]
+__all__ = ["StandardTemplateRecognizer"]

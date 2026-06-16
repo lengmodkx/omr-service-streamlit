@@ -1,5 +1,5 @@
 """
-TDD: 黄金模板对比法 测试套件
+TDD: 标准模板对比法 测试套件
 Step 1: 网格切分
 Step 2: 气泡采样
 Step 3: 三道防线判断
@@ -29,14 +29,14 @@ def check(condition, msg):
 
 def test_grid_basic():
     """给定列框坐标和行列参数，验证气泡坐标正确生成"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     config = {
         "x1": 100, "y1": 200, "x2": 400, "y2": 700,
         "start_q": 1, "num_q": 5, "num_options": 4,
     }
 
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     bubbles = gtp._generate_grid(config)
 
     check(len(bubbles) == 20, f"气泡总数应为20，实际{len(bubbles)}")
@@ -84,14 +84,14 @@ def test_grid_reverse_q():
 
     用于 OMR0002 蒙文答题卡"题号倒序排列"场景
     """
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     config = {
         "x1": 100, "y1": 200, "x2": 400, "y2": 700,
         "start_q": 1, "num_q": 5, "num_options": 4,
         "reverse_q": True,
     }
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     bubbles = gtp._generate_grid(config)
 
     row_h = (700 - 200) / 5  # 100
@@ -121,14 +121,14 @@ def test_grid_reverse_q_default_false():
 
     现有模板 JSON 没有 reverse_q 字段,必须默认正常排序
     """
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     config = {
         "x1": 100, "y1": 200, "x2": 400, "y2": 700,
         "start_q": 1, "num_q": 5, "num_options": 4,
         # 注意: 没有 reverse_q 字段
     }
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     bubbles = gtp._generate_grid(config)
 
     row_h = (700 - 200) / 5
@@ -140,14 +140,14 @@ def test_grid_reverse_q_default_false():
 
 def test_grid_three_options():
     """3选项版面（常见于物理/化学选择题只有ABC三个选项）"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     config = {
         "x1": 50, "y1": 100, "x2": 350, "y2": 340,
         "start_q": 6, "num_q": 3, "num_options": 3,
     }
 
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     bubbles = gtp._generate_grid(config)
 
     check(len(bubbles) == 9, f"3行3列应为9个气泡，实际{len(bubbles)}")
@@ -159,14 +159,14 @@ def test_grid_three_options():
 
 def test_grid_start_q_offset():
     """起始题号不从1开始的情况"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     config = {
         "x1": 0, "y1": 0, "x2": 200, "y2": 200,
         "start_q": 21, "num_q": 2, "num_options": 2,
     }
 
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     bubbles = gtp._generate_grid(config)
 
     q_nums = sorted(set(b["q"] for b in bubbles))
@@ -175,7 +175,7 @@ def test_grid_start_q_offset():
 
 def test_bubble_window_size():
     """气泡检测窗口与网格间距成比例"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     config = {
         "x1": 100, "y1": 100, "x2": 500, "y2": 500,
@@ -183,7 +183,7 @@ def test_bubble_window_size():
     }
     # col_w = 100, row_h = 100, 预期 w/h ≈ 50
 
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     bubbles = gtp._generate_grid(config)
 
     b = bubbles[0]
@@ -206,10 +206,10 @@ def make_synthetic_roi(w=400, h=300, dark_spots=None):
 
 def test_sample_blank():
     """空白位置采样: 灰度应在220以上"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     img = make_synthetic_roi()
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     val = gtp._sample_bubble(img, 200, 150, 40, 40, 400, 300)
 
     check(val > 220, f"空白气泡灰度应>220，实际{val:.0f}")
@@ -217,12 +217,12 @@ def test_sample_blank():
 
 def test_sample_filled():
     """填涂位置采样: 灰度应在170以下"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     img = make_synthetic_roi(dark_spots=[(200, 150, 12, 120)])
     img = cv2.GaussianBlur(img, (5, 5), 0)
 
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     val = gtp._sample_bubble(img, 200, 150, 40, 40, 400, 300)
 
     check(val < 190, f"填涂气泡灰度应<190，实际{val:.0f}")
@@ -230,10 +230,10 @@ def test_sample_filled():
 
 def test_sample_boundary_clip():
     """边缘坐标不越界"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     img = make_synthetic_roi()
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
 
     # 坐标在图片边缘外
     val = gtp._sample_bubble(img, -10, -10, 30, 30, 400, 300)
@@ -255,9 +255,9 @@ def make_mock_q_groups(best_gray=130, second_gray=215, third_gray=220, fourth_gr
 
 def test_judge_normal_fill():
     """T3.3: 一个暗、其他亮 → 选中"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     gtp.bubbles = [{"q": 1, "opt": o, "x": 50 + i*80, "y": 150, "w": 16, "h": 16}
                    for i, o in enumerate("ABCD")]
     gtp.answers = {1: "A"}
@@ -278,9 +278,9 @@ def test_judge_normal_fill():
 
 def test_judge_all_blank():
     """T3.1: 全部 > 200 → 未填涂"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     gtp.bubbles = [{"q": 1, "opt": o, "x": 50 + i*80, "y": 150, "w": 16, "h": 16}
                    for i, o in enumerate("ABCD")]
     gtp.answers = {}
@@ -299,9 +299,9 @@ def test_judge_all_blank():
 
 def test_judge_multi_fill():
     """T3.2: 两个 < 180 → 多涂"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     gtp.bubbles = [{"q": 1, "opt": o, "x": 50 + i*80, "y": 150, "w": 16, "h": 16}
                    for i, o in enumerate("ABCD")]
     gtp.answers = {}
@@ -324,9 +324,9 @@ def test_judge_multi_fill():
 
 def test_judge_uncertain():
     """T3.4: 差异不够大 → uncertain"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     gtp.bubbles = [{"q": 1, "opt": o, "x": 50 + i*80, "y": 150, "w": 16, "h": 16}
                    for i, o in enumerate("ABCD")]
     gtp.answers = {}
@@ -348,9 +348,9 @@ def test_judge_uncertain():
 
 def test_judge_all_black():
     """T3.5: 全涂黑 → 多涂"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     gtp.bubbles = [{"q": 1, "opt": o, "x": 50 + i*80, "y": 150, "w": 16, "h": 16}
                    for i, o in enumerate("ABCD")]
     gtp.answers = {}
@@ -374,9 +374,9 @@ def test_judge_all_black():
 
 def test_card_flag_abnormal():
     """卡片级: 多涂率 > 50% → 异常标记"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
-    gtp = GoldenTemplate.__new__(GoldenTemplate)
+    gtp = StandardTemplate.__new__(StandardTemplate)
     gtp.bubbles = []
     gtp.answers = {}
     for qi in range(5):
@@ -404,7 +404,7 @@ def test_ecc_align_same_batch():
     import glob as _glob
     from pathlib import Path as _Path
     import numpy as _np
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     # 用同批次两张A面答题卡
     a_files = sorted(_glob.glob("testPaper/答题卡/OMR0001/*A*"))
@@ -422,7 +422,7 @@ def test_ecc_align_same_batch():
         check(True, "跳过: 图片读取失败")
         return
 
-    # 用img1作为黄金模板（裁剪选项区域），img2作为待对齐目标
+    # 用img1作为标准模板（裁剪选项区域），img2作为待对齐目标
     h1, w1 = img1.shape[:2]
 
     # 取图片中间区域作为ROI
@@ -434,7 +434,7 @@ def test_ecc_align_same_batch():
     target_roi = img2[y1:y2, x1:x2]
     ref_roi = img1[y1:y2, x1:x2]
 
-    aligned, success = GoldenTemplate.align(ref_roi, target_roi)
+    aligned, success = StandardTemplate.align(ref_roi, target_roi)
 
     check(success, "ECC应对齐成功")
     check(aligned.shape == ref_roi.shape[:2],
@@ -454,7 +454,7 @@ def test_e2e_recognize():
     """端到端：输入答题卡 → 输出答案，与手工确认的答案对比"""
     import glob as _glob
     import numpy as _np
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     a_files = sorted(_glob.glob("testPaper/答题卡/OMR0001/*02A*"))
     if not a_files:
@@ -477,7 +477,7 @@ def test_e2e_recognize():
         "start_q": 1, "num_q": 3, "num_options": 4,
     }
 
-    gtp = GoldenTemplate(img, [cfg])
+    gtp = StandardTemplate(img, [cfg])
 
     # 对自身识别（因为没有另一张卡，用自身测试流程是否跑通）
     result = gtp.recognize(img)
@@ -500,10 +500,10 @@ def test_classify_q16_real_borderline():
     旧行为(阈值 8): best_val>210 && best_delta<8 → empty (错!)
     新行为(阈值 4): best_delta=4.65 不满足 <4 → 落到 uncertain (对)
     """
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     q16 = [("B", 214.1), ("C", 217.2), ("A", 220.3)]
-    r = GoldenTemplate._classify_answer(q16)
+    r = StandardTemplate._classify_answer(q16)
 
     check(r["status"] == "uncertain",
           f"Q16 真实数据(best=214.1, others 217-220)应 uncertain，实际 {r['status']}")
@@ -518,10 +518,10 @@ def test_classify_q11_real_borderline():
     行为: best_val=204 < 215 但 best_delta=5.6 < 12 (新规则门槛)
           且 gap=3.7 < 5 → 不满足防线3统一规则 → uncertain
     """
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     q11 = [("B", 204.4), ("A", 208.1), ("C", 211.9)]
-    r = GoldenTemplate._classify_answer(q11)
+    r = StandardTemplate._classify_answer(q11)
 
     check(r["status"] == "uncertain",
           f"Q11 真实数据(best=204.4, delta=5.6)应 uncertain，实际 {r['status']}")
@@ -531,10 +531,10 @@ def test_classify_q11_real_borderline():
 
 def test_classify_clear_empty():
     """T6.3: 全 235 灰度(确为空白)→ empty 不变(收紧阈值后仍触发)"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     all_blank = [("A", 235), ("B", 235), ("C", 235), ("D", 235)]
-    r = GoldenTemplate._classify_answer(all_blank)
+    r = StandardTemplate._classify_answer(all_blank)
 
     check(r["status"] == "empty",
           f"全空白应 empty，实际 {r['status']}")
@@ -543,10 +543,10 @@ def test_classify_clear_empty():
 
 def test_classify_clear_single():
     """T6.4: 明显填涂(A=130)→ single A 不变"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     normal = [("A", 130), ("B", 235), ("C", 235), ("D", 235)]
-    r = GoldenTemplate._classify_answer(normal)
+    r = StandardTemplate._classify_answer(normal)
 
     check(r["status"] == "single", f"明显填涂应 single，实际 {r['status']}")
     check(r["answer"] == "A", f"应选 A，实际 {r['answer']}")
@@ -554,10 +554,10 @@ def test_classify_clear_single():
 
 def test_classify_multi_two_dark():
     """T6.5: 两个 < 150 → multi 不变"""
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     multi = [("A", 130), ("B", 135), ("C", 230), ("D", 230)]
-    r = GoldenTemplate._classify_answer(multi)
+    r = StandardTemplate._classify_answer(multi)
 
     check(r["status"] == "multi", f"两暗应 multi，实际 {r['status']}")
 
@@ -567,10 +567,10 @@ def test_classify_threshold_boundary_below_4():
 
     场景: 纸张均匀亮(均 220),B 略暗 3.9 → 系统判为"未填涂"
     """
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     border = [("B", 220.0), ("A", 223.9), ("C", 224.0)]
-    r = GoldenTemplate._classify_answer(border)
+    r = StandardTemplate._classify_answer(border)
 
     check(r["status"] == "empty",
           f"best_delta=3.9(<4)应 empty，实际 {r['status']}")
@@ -581,10 +581,10 @@ def test_classify_threshold_boundary_above_4():
 
     旧阈值 8 会判 empty;新阈值 4 落到 uncertain
     """
-    from core.golden_template import GoldenTemplate
+    from core.standard_template import StandardTemplate
 
     border = [("B", 214.0), ("A", 217.0), ("C", 218.0)]   # best_delta ≈ 3.5
-    r = GoldenTemplate._classify_answer(border)
+    r = StandardTemplate._classify_answer(border)
     # 实际 best_delta = (217+218)/2 - 214 = 3.5 < 4 → empty
     # 此例证: 收紧到 4 后,3.5 这种"真的小差异"仍判 empty
     check(r["status"] == "empty",
@@ -592,7 +592,7 @@ def test_classify_threshold_boundary_above_4():
 
     # 调整到 best_delta=4.5 (>4)
     border2 = [("B", 213.0), ("A", 217.0), ("C", 218.0)]   # best_delta = (217+218)/2 - 213 = 4.5
-    r2 = GoldenTemplate._classify_answer(border2)
+    r2 = StandardTemplate._classify_answer(border2)
     check(r2["status"] == "uncertain",
           f"best_delta=4.5(>4)应 uncertain，实际 {r2['status']}")
 

@@ -1,5 +1,5 @@
 """
-黄金模板对比法 — 核心类
+标准模板对比法 — 核心类
 用一张正确填涂的答题卡同时充当定位基准和标准答案
 """
 import cv2
@@ -7,8 +7,8 @@ import numpy as np
 from typing import Dict, List, Tuple
 
 
-class GoldenTemplate:
-    """正确填涂答题卡的黄金模板"""
+class StandardTemplate:
+    """正确填涂答题卡的标准模板"""
 
     def __init__(self, image: np.ndarray, column_configs: List[Dict]):
         self.image = image
@@ -103,7 +103,7 @@ class GoldenTemplate:
         return bubbles
 
     def _auto_detect_answers(self, image: np.ndarray):
-        """对黄金模板自身采样暗度，自动识别标准答案
+        """对标准模板自身采样暗度，自动识别标准答案
         2026-06-04 重构: 改用 _classify_answer 静态方法(支持 multi),避免老逻辑漏判多选
         原 OMR0026 Q1 真填涂 AC,但老逻辑 best_delta<9 直接返回 A(丢 C)
         """
@@ -335,7 +335,7 @@ class GoldenTemplate:
             return {"answer": None, "status": "uncertain"}
 
     def recognize(self, target_img: np.ndarray, debug: bool = False) -> Dict:
-        """主入口：全局ECC对齐 → 采样 → 判断 → 对比黄金答案。
+        """主入口：全局ECC对齐 → 采样 → 判断 → 对比标准答案。
         设置 debug=True 打印每题的详细采样值，用于诊断识别失败原因。"""
         # 安全检查：防止零尺寸或无效图像导致 OpenCV 底层崩溃
         if target_img is None or target_img.size == 0:
@@ -364,7 +364,7 @@ class GoldenTemplate:
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         h, w = gray.shape
 
-        # 全局ECC对齐：将待识别卡片对齐到黄金模板，消除扫描偏移
+        # 全局ECC对齐：将待识别卡片对齐到标准模板，消除扫描偏移
         if self.image is not None:
             ref_gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY) if len(self.image.shape) == 3 else self.image
             ref_blur = cv2.GaussianBlur(ref_gray, (5, 5), 0)
@@ -401,7 +401,7 @@ class GoldenTemplate:
 
         for q, opts in q_groups.items():
             sorted_opts = sorted(opts.items(), key=lambda x: x[1])
-            gold_ans = self.answers.get(q)
+            std_ans = self.answers.get(q)
 
             # 调用纯函数判定(防线1-3b + uncertain)— 顺序已在 _classify_answer 内固定
             classification = self._classify_answer(sorted_opts)
@@ -423,13 +423,13 @@ class GoldenTemplate:
             mean_val = sum(all_vals) / len(all_vals) if all_vals else 255
             dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 150)
 
-            # 与黄金答案对比（多选题按字符集比较，顺序无关）
+            # 与标准答案对比（多选题按字符集比较，顺序无关）
             ans = answers[q]["answer"]
-            if ans and gold_ans:
+            if ans and std_ans:
                 if answers[q]["status"] == "multi":
-                    answers[q]["correct"] = (set(ans) == set(gold_ans))
+                    answers[q]["correct"] = (set(ans) == set(std_ans))
                 else:
-                    answers[q]["correct"] = (ans == gold_ans)
+                    answers[q]["correct"] = (ans == std_ans)
             else:
                 answers[q]["correct"] = None
 

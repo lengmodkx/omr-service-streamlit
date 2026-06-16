@@ -2,7 +2,7 @@
 Recognizer 协议 — 统一识别器接口
 
 设计目标:
-- 所有识别方式(黄金模板/YOLO/AI)实现同一接口
+- 所有识别方式(标准模板/YOLO/AI)实现同一接口
 - 零 OpenCV 依赖(本文件不 import cv2, 保持微服务可平移)
 - runtime_checkable 协议,支持 isinstance(rec, Recognizer) 检查
 - RecognizeResult 是 dataclass,便于下游消费者做字段访问
@@ -35,13 +35,13 @@ class RecognizeContext:
     """识别上下文 — 识别器所需的所有外部依赖打包
 
     Attributes:
-        template_config: 模板 JSON dict(可空,黄金模板法不需要)
-        blank_refs: 空白参考 {A: np.ndarray, B: np.ndarray}(黄金模板法不需要)
-        column_boxes: 黄金模板列框[{x1, y1, x2, y2}, ...]
+        template_config: 模板 JSON dict(可空,标准模板法不需要)
+        blank_refs: 空白参考 {A: np.ndarray, B: np.ndarray}(标准模板法不需要)
+        column_boxes: 标准模板列框[{x1, y1, x2, y2}, ...]
         custom_bubbles: 自定义选项框[{q, opt, x, y, w, h}, ...]
         standard_answers: 标准答案 {q: "A" 或 "ABC"}(可选,用于算 correct)
         page: A 面 / B 面
-        threshold: 暗度识别阈值(预留,目前黄金模板不直接使用)
+        threshold: 暗度识别阈值(预留,目前标准模板不直接使用)
     """
     template_config: Optional[dict] = None
     blank_refs: dict = field(default_factory=dict)
@@ -76,7 +76,7 @@ class RecognizeResult:
     recognizer_id: str = ""
 
     def to_legacy_dict(self) -> dict:
-        """转换为与 GoldenTemplate.recognize() 旧版 dict 一致的形态
+        """转换为与 StandardTemplate.recognize() 旧版 dict 一致的形态
 
         用于 app.py 下游代码 0 改动。阶段 5 UI 拆分后再移除。
         """
@@ -114,7 +114,7 @@ class Recognizer(Protocol):
         """根据上下文判断是否可处理
 
         典型实现:
-        - GoldenTemplateRecognizer: self._gtp is not None 且 bubbles 非空
+        - StandardTemplateRecognizer: self._stp is not None 且 bubbles 非空
         - YoloRecognizer: ctx.template_config.get("yolo_model") is not None
         """
         ...
@@ -138,7 +138,7 @@ def make_recognizer(recognizer_id: str, **kwargs) -> Recognizer:
     """工厂函数 — 根据 ID 构造识别器实例
 
     用法:
-        rec = make_recognizer("golden", golden_template=gtp)
+        rec = make_recognizer("standard", standard_template=stp)
         rec = make_recognizer("yolo", model_path="...")        # 未来
         rec = make_recognizer("ai", api_key="...")              # 未来
 
@@ -148,15 +148,15 @@ def make_recognizer(recognizer_id: str, **kwargs) -> Recognizer:
     Raises:
         ValueError: 未知的 recognizer_id
     """
-    if recognizer_id == "golden":
-        from core.recognizers.golden import GoldenTemplateRecognizer
-        return GoldenTemplateRecognizer(**kwargs)
+    if recognizer_id == "standard":
+        from core.recognizers.standard import StandardTemplateRecognizer
+        return StandardTemplateRecognizer(**kwargs)
     raise ValueError(
         f"未知的 recognizer_id: {recognizer_id!r}。"
-        f"已实现: golden。未来: yolo, ai。"
+        f"已实现: standard。未来: yolo, ai。"
     )
 
 
 def list_recognizer_ids() -> list:
     """列出已注册的识别器 ID(用于 UI 下拉框)"""
-    return ["golden"]
+    return ["standard"]

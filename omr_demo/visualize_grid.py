@@ -1,27 +1,27 @@
 """
-可视化诊断：在黄金模板上画出网格线、题号、采样窗口
+可视化诊断：在标准模板上画出网格线、题号、采样窗口
 用于确认 column_configs 的框选是否准确
 """
 import sys
 sys.path.insert(0, ".")
 import cv2
 import numpy as np
-from core.golden_template import GoldenTemplate
+from core.standard_template import StandardTemplate
 
 
-def visualize(golden_image_path, column_configs, output_path="grid_debug.jpg"):
-    img = cv2.imread(golden_image_path, cv2.IMREAD_COLOR)
+def visualize(template_image_path, column_configs, output_path="grid_debug.jpg"):
+    img = cv2.imread(template_image_path, cv2.IMREAD_COLOR)
     if img is None:
-        print(f"无法读取: {golden_image_path}")
+        print(f"无法读取: {template_image_path}")
         return
 
-    gtp = GoldenTemplate(img, column_configs)
+    stp = StandardTemplate(img, column_configs)
     vis = img.copy()
     h, w = vis.shape[:2]
 
     # 按题号分组
     q_bubbles = {}
-    for b in gtp.bubbles:
+    for b in stp.bubbles:
         q_bubbles.setdefault(b["q"], []).append(b)
 
     # 画每个气泡的采样窗口（绿色圆圈）和题号（红色）
@@ -66,7 +66,7 @@ def visualize(golden_image_path, column_configs, output_path="grid_debug.jpg"):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("用法: python visualize_grid.py <黄金模板图片路径>")
+        print("用法: python visualize_grid.py <标准模板图片路径>")
         print("请先在脚本底部修改 column_configs 为你的实际配置")
         sys.exit(1)
 

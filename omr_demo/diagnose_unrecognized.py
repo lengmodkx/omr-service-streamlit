@@ -1,22 +1,22 @@
 """
-诊断脚本：分析黄金模板未识别题目的具体失败原因
+诊断脚本：分析标准模板未识别题目的具体失败原因
 打印每道题的采样值、各阈值判断结果
 """
 import sys
 sys.path.insert(0, ".")
 import numpy as np
 import cv2
-from core.golden_template import GoldenTemplate
+from core.standard_template import StandardTemplate
 
 
-def diagnose(golden_image_path, column_configs):
+def diagnose(template_image_path, column_configs):
     """详细诊断每道题的识别过程"""
-    img = cv2.imread(golden_image_path, cv2.IMREAD_COLOR)
+    img = cv2.imread(template_image_path, cv2.IMREAD_COLOR)
     if img is None:
-        print(f"无法读取: {golden_image_path}")
+        print(f"无法读取: {template_image_path}")
         return
 
-    gtp = GoldenTemplate(img, column_configs)
+    stp = StandardTemplate(img, column_configs)
 
     # 重新跑一次 _auto_detect_answers 的详细分析
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -24,7 +24,7 @@ def diagnose(golden_image_path, column_configs):
     h, w = gray.shape
 
     # 先校准位置
-    for b in gtp.bubbles:
+    for b in stp.bubbles:
         search_r = max(3, int(min(b["w"], b["h"]) * 0.20))
         x1 = max(0, b["x"] - search_r)
         y1 = max(0, b["y"] - search_r)
@@ -39,10 +39,10 @@ def diagnose(golden_image_path, column_configs):
 
     # 采样
     q_groups = {}
-    for b in gtp.bubbles:
+    for b in stp.bubbles:
         q = b["q"]
         opt = b["opt"]
-        mean_g = gtp._sample_bubble(blurred, b["x"], b["y"], b["w"], b["h"], w, h)
+        mean_g = stp._sample_bubble(blurred, b["x"], b["y"], b["w"], b["h"], w, h)
         q_groups.setdefault(q, {})[opt] = mean_g
 
     print("=" * 80)
@@ -68,7 +68,7 @@ def diagnose(golden_image_path, column_configs):
 
         best_vs_brightest = sorted_opts[-1][1] - best_val
 
-        # 各检查结果（与 golden_template.py 主逻辑严格一致）
+        # 各检查结果（与 standard_template.py 主逻辑严格一致）
         empty_check = mean_val > 200 and range_val < 30 and best_val > 210 and best_delta < 8
         dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 175)
         abs_dark = sum(1 for v in all_vals if v < 160)
@@ -94,7 +94,7 @@ def diagnose(golden_image_path, column_configs):
         if status != "SINGLE":
             unrecognized.append(q)
             print(f"\n{'─' * 60}")
-            print(f"Q{q:>2} 状态: {status}  |  gold_ans: {gtp.answers.get(q)}")
+            print(f"Q{q:>2} 状态: {status}  |  gold_ans: {stp.answers.get(q)}")
             print(f"  采样值: {', '.join(f'{o}={v:.1f}' for o, v in sorted_opts)}")
             print(f"  best={best_opt}={best_val:.1f}  second={second_val:.1f}  mean={mean_val:.1f}  range={range_val:.1f}")
             print(f"  best_delta={best_delta:.1f}(需>9 或 >6+浅填涂)  gap={gap:.1f}(需>2 或 >0+浅填涂)  gap_ratio={gap_ratio:.2f}(需>0.06)  bvb={best_vs_brightest:.1f}(需>15)")

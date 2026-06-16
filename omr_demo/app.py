@@ -17,7 +17,7 @@ from streamlit_drawable_canvas import st_canvas
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core.processor import CardProcessor
-from core.golden_template import GoldenTemplate
+from core.standard_template import StandardTemplate
 from core.score_calculator import calc_total_score, ScoringConfig
 from core.recognizer import make_recognizer, RecognizeContext
 
@@ -43,13 +43,13 @@ def init_state():
         "custom_bubbles_img_size": None,  # 标定时图片尺寸 (w, h)
         # 选择题所在面: "A" / "B" — 用户在 Tab1 指定,Tab2 据此识别
         "mc_side": "A",
-        # 黄金模板标定
-        "golden_image": None,           # 黄金模板图片（正确的填涂答题卡）
-        "golden_column_boxes": [],      # 用户画的列框 [{x1,y1,x2,y2}, ...]
-        "golden_column_configs": [],    # 列框完整参数 [{start_q,num_q,num_options,...}]
-        "golden_template": None,        # GoldenTemplate 实例
-        "golden_answers": {},           # 黄金模板自动识别的答案 {q: opt}
-        "golden_results": [],           # 黄金模板批量识别结果
+        # 标准模板标定
+        "template_image": None,           # 标准模板图片（正确的填涂答题卡）
+        "template_column_boxes": [],      # 用户画的列框 [{x1,y1,x2,y2}, ...]
+        "template_column_configs": [],    # 列框完整参数 [{start_q,num_q,num_options,...}]
+        "standard_template": None,        # StandardTemplate 实例
+        "template_answers": {},           # 标准模板自动识别的答案 {q: opt}
+        "template_results": [],           # 标准模板批量识别结果
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -67,13 +67,13 @@ def init_state():
 
 init_state()
 
-def on_golden_upload():
+def on_template_upload():
     """文件上传回调：将图片存入 session_state，避免 rerun 导致上传文件丢失"""
-    f = st.session_state.get("golden_upload")
+    f = st.session_state.get("template_upload")
     if f is not None:
         decoded = cv2.imdecode(np.frombuffer(f.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR)
         if decoded is not None:
-            st.session_state.golden_image = decoded
+            st.session_state.template_image = decoded
 
 st.title("📄 答题卡智能处理系统 (Demo版)")
 st.caption("流程：上传空白模板 → 标定参考 → 批量处理 → 人工核对 → 导出成绩 | 或：上传参考图 → 手动标定区域 → 批量裁剪")
@@ -327,10 +327,10 @@ with tab1:
                 except Exception as e:
                     st.error(f"导入失败: {e}")
     
-    # ===== 黄金模板标定 =====
+    # ===== 标准模板标定 =====
     st.divider()
-    st.header("2. 黄金模板标定")
-    st.info("上传一份**正确填涂**的答题卡，画出选择题列区域，系统自动识别答案并保存为黄金模板。后续批量处理时用此模板比对识别。")
+    st.header("2. 标准模板标定")
+    st.info("上传一份**正确填涂**的答题卡，画出选择题列区域，系统自动识别答案并保存为标准模板。后续批量处理时用此模板比对识别。")
 
     # 选择题所在面 — 决定 Tab2 识别哪张图
     # 默认 A 面是常规情况(选择题在 A),遇到"B 面才是含选择题的卷"切到 B
@@ -343,43 +343,43 @@ with tab1:
         help="常规答题卡选择题在 A 面;若 B 面才是含选择题的主卷(如化学单面卷),切到 B",
     )
 
-    golden_img_file = st.file_uploader(
+    template_img_file = st.file_uploader(
         "上传正确填涂的答题卡", type=["jpg", "jpeg", "png"],
-        key="golden_upload", on_change=on_golden_upload)
+        key="template_upload", on_change=on_template_upload)
 
-    if st.session_state.golden_image is not None:
-        gimg = st.session_state.golden_image
-        gh, gw = gimg.shape[:2]
-        st.caption(f"图片尺寸: {gw} × {gh}  |  下方画布叠加了该图片作为背景，可直接拖拽画框")
+    if st.session_state.template_image is not None:
+        timg = st.session_state.template_image
+        th, tw = timg.shape[:2]
+        st.caption(f"图片尺寸: {tw} × {th}  |  下方画布叠加了该图片作为背景，可直接拖拽画框")
 
         # Canvas 画列框 (1500px 适配单面大尺寸答题卡,画框更精准)
         MAX_CANVAS_WIDTH = 1500
-        g_canvas_scale = MAX_CANVAS_WIDTH / gw
-        g_display_w = MAX_CANVAS_WIDTH
-        g_display_h = int(gh * g_canvas_scale)
+        t_canvas_scale = MAX_CANVAS_WIDTH / tw
+        t_display_w = MAX_CANVAS_WIDTH
+        t_display_h = int(gh * t_canvas_scale)
 
-        g_bg = Image.fromarray(cv2.cvtColor(gimg, cv2.COLOR_BGR2RGB))
-        g_bg = g_bg.convert("RGBA")
-        g_bg = g_bg.resize((g_display_w, g_display_h))
+        t_bg = Image.fromarray(cv2.cvtColor(timg, cv2.COLOR_BGR2RGB))
+        t_bg = t_bg.convert("RGBA")
+        t_bg = t_bg.resize((t_display_w, t_display_h))
 
         st.markdown("**画列框**：在图片上拖拽画出每列选择题的矩形区域")
         st.caption("从左到右依次画框，每个框围住一列选择题的所有气泡")
 
-        g_canvas_ver = st.session_state.get("golden_canvas_ver", 0)
+        g_canvas_ver = st.session_state.get("template_canvas_ver", 0)
 
         # 把已存列框(原图坐标)按当前画布 scale 反向缩放,回显到画布
         # 这样:换画布宽度后之前画的框依然在原位,不需要从头画
-        existing_boxes = st.session_state.get("golden_column_boxes", [])
-        if existing_boxes and g_canvas_scale > 0:
+        existing_boxes = st.session_state.get("template_column_boxes", [])
+        if existing_boxes and t_canvas_scale > 0:
             initial_drawing = {
                 "version": "4.4.0",
                 "objects": [
                     {
                         "type": "rect",
-                        "left": box["x1"] * g_canvas_scale,
-                        "top": box["y1"] * g_canvas_scale,
-                        "width": (box["x2"] - box["x1"]) * g_canvas_scale,
-                        "height": (box["y2"] - box["y1"]) * g_canvas_scale,
+                        "left": box["x1"] * t_canvas_scale,
+                        "top": box["y1"] * t_canvas_scale,
+                        "width": (box["x2"] - box["x1"]) * t_canvas_scale,
+                        "height": (box["y2"] - box["y1"]) * t_canvas_scale,
                         "fill": "rgba(255, 165, 0, 0.2)",
                         "stroke": "#FF0000",
                         "strokeWidth": 2,
@@ -390,23 +390,23 @@ with tab1:
         else:
             initial_drawing = None
 
-        g_canvas_result = st_canvas(
+        t_canvas_result = st_canvas(
             fill_color="rgba(255, 165, 0, 0.2)",
             stroke_width=2,
             stroke_color="#FF0000",
-            background_image=g_bg,
-            height=g_display_h,
-            width=g_display_w,
+            background_image=t_bg,
+            height=t_display_h,
+            width=t_display_w,
             drawing_mode="rect",
             initial_drawing=initial_drawing,
-            key=f"golden_canvas_{g_canvas_ver}",
+            key=f"template_canvas_{g_canvas_ver}",
             update_streamlit=True,
         )
 
         col_ext, col_clr = st.columns([1, 1])
         with col_ext:
-            if st.button("提取画框", key="golden_extract"):
-                json_data = g_canvas_result.json_data
+            if st.button("提取画框", key="template_extract"):
+                json_data = t_canvas_result.json_data
                 if json_data is None:
                     st.warning("未获取到画布数据，请确保已在画布上画了矩形框再点击提取")
                 else:
@@ -418,56 +418,56 @@ with tab1:
                         boxes = []
                         for obj in rects:
                             boxes.append({
-                                "x1": int(obj["left"] / g_canvas_scale),
-                                "y1": int(obj["top"] / g_canvas_scale),
-                                "x2": int((obj["left"] + obj["width"]) / g_canvas_scale),
-                                "y2": int((obj["top"] + obj["height"]) / g_canvas_scale),
+                                "x1": int(obj["left"] / t_canvas_scale),
+                                "y1": int(obj["top"] / t_canvas_scale),
+                                "x2": int((obj["left"] + obj["width"]) / t_canvas_scale),
+                                "y2": int((obj["top"] + obj["height"]) / t_canvas_scale),
                             })
-                        st.session_state.golden_column_boxes = boxes
-                        st.session_state.golden_canvas_ver = g_canvas_ver + 1
+                        st.session_state.template_column_boxes = boxes
+                        st.session_state.template_canvas_ver = g_canvas_ver + 1
                         st.success(f"已提取 {len(boxes)} 个列框")
                         st.rerun()
         with col_clr:
-            if st.button("清空画布", key="golden_clear"):
-                st.session_state.golden_canvas_ver = g_canvas_ver + 1
-                st.session_state.golden_column_boxes = []
-                st.session_state.golden_column_configs = []
+            if st.button("清空画布", key="template_clear"):
+                st.session_state.template_canvas_ver = g_canvas_ver + 1
+                st.session_state.template_column_boxes = []
+                st.session_state.template_column_configs = []
                 st.rerun()
 
         # 列框参数配置
-        if st.session_state.golden_column_boxes:
-            boxes = st.session_state.golden_column_boxes
+        if st.session_state.template_column_boxes:
+            boxes = st.session_state.template_column_boxes
             st.markdown(f"**已提取 {len(boxes)} 个列框，配置每题参数：**")
 
             # 批量默认值
             bc1, bc2, bc3 = st.columns([1, 1, 1])
             with bc1:
-                batch_nq = st.number_input("默认题目数", 1, 20, 5, key="golden_batch_nq")
+                batch_nq = st.number_input("默认题目数", 1, 20, 5, key="template_batch_nq")
             with bc2:
-                batch_no = st.number_input("默认选项数", 2, 7, 4, key="golden_batch_no")
+                batch_no = st.number_input("默认选项数", 2, 7, 4, key="template_batch_no")
             with bc3:
-                if st.button("应用到全部列", key="golden_batch_apply"):
+                if st.button("应用到全部列", key="template_batch_apply"):
                     for i in range(len(boxes)):
-                        st.session_state[f"gc_nq_{i}"] = int(batch_nq)
-                        st.session_state[f"gc_no_{i}"] = int(batch_no)
+                        st.session_state[f"tc_nq_{i}"] = int(batch_nq)
+                        st.session_state[f"tc_no_{i}"] = int(batch_no)
                     st.rerun()
 
             configs = []
             for i, box in enumerate(boxes):
                 cols = st.columns([1, 1, 1, 1, 1.1, 1.5])
                 with cols[0]:
-                    sq = st.number_input("起始题号", min_value=1, value=i * 5 + 1, key=f"gc_sq_{i}")
+                    sq = st.number_input("起始题号", min_value=1, value=i * 5 + 1, key=f"tc_sq_{i}")
                 with cols[1]:
                     nq = st.number_input("题目数", min_value=1,
-                                         value=st.session_state.get(f"gc_nq_{i}", 5),
-                                         key=f"gc_nq_{i}")
+                                         value=st.session_state.get(f"tc_nq_{i}", 5),
+                                         key=f"tc_nq_{i}")
                 with cols[2]:
                     no = st.number_input("选项数", min_value=2,
-                                         value=st.session_state.get(f"gc_no_{i}", 4),
-                                         key=f"gc_no_{i}")
+                                         value=st.session_state.get(f"tc_no_{i}", 4),
+                                         key=f"tc_no_{i}")
                 with cols[3]:
                     # 2026-06-04 新增: 倒序题号选项(用于 OMR0002 蒙文答题卡等倒序排列模板)
-                    rv = st.checkbox("倒序", value=False, key=f"gc_rv_{i}",
+                    rv = st.checkbox("倒序", value=False, key=f"tc_rv_{i}",
                                      help="勾选时 Q1 放在题号轴末端(x轴→x2端,y轴→y2端)。配合'选项纵向'使用,适配蒙文答题卡")
                 with cols[4]:
                     # 2026-06-08 新增: 选项轴方向
@@ -477,7 +477,7 @@ with tab1:
                         "选项轴",
                         options=["x", "y"],
                         index=0,
-                        key=f"gc_oa_{i}",
+                        key=f"tc_oa_{i}",
                         help="x: ABCD 横向、题号纵向(标准);y: ABCD 纵向、题号横向(OMR0002 蒙文答题卡)",
                     )
                 with cols[5]:
@@ -489,28 +489,28 @@ with tab1:
                     "reverse_q": bool(rv),  # 2026-06-04 新增
                     "option_axis": oa,  # 2026-06-08 新增
                 })
-            st.session_state.golden_column_configs = configs
+            st.session_state.template_column_configs = configs
 
-            # 生成并保存黄金模板
-            if st.button("生成黄金模板并自动识别答案", type="primary"):
-                gtp = GoldenTemplate(gimg, configs)
-                st.session_state.golden_template = gtp
-                st.session_state.golden_answers = gtp.answers
-                st.success(f"黄金模板已生成！{len(gtp.bubbles)} 个气泡，{len(gtp.answers)} 题答案")
+            # 生成并保存标准模板
+            if st.button("生成标准模板并自动识别答案", type="primary"):
+                std_tpl =StandardTemplate(timg, configs)
+                st.session_state.standard_template = std_tpl
+                st.session_state.template_answers = std_tpl.answers
+                st.success(f"标准模板已生成！{len(std_tpl.bubbles)} 个气泡，{len(std_tpl.answers)} 题答案")
                 st.rerun()
 
     # 核对与修正答案
-    if st.session_state.golden_template is not None:
-        gtp = st.session_state.golden_template
+    if st.session_state.standard_template is not None:
+        std_tpl =st.session_state.standard_template
         st.divider()
-        st.subheader("核对黄金模板答案")
+        st.subheader("核对标准模板答案")
         st.caption("检查自动识别的答案是否正确，如有误请修正")
 
         ans_data = []
-        for q in sorted(gtp.answers.keys()):
+        for q in sorted(std_tpl.answers.keys()):
             ans_data.append({
                 "题号": q,
-                "识别答案": gtp.answers.get(q) or "(未识别)",
+                "识别答案": std_tpl.answers.get(q) or "(未识别)",
             })
         if ans_data:
             df_ans = pd.DataFrame(ans_data)
@@ -521,7 +521,7 @@ with tab1:
                 },
                 hide_index=True,
                 height=400,
-                key="golden_answer_editor",
+                key="template_answer_editor",
             )
 
             with st.columns([1, 1, 3])[0]:
@@ -529,14 +529,14 @@ with tab1:
                     for _, row in edited.iterrows():
                         val = str(row["识别答案"]).strip().upper()
                         if val and val != "(未识别)" and val != "NONE":
-                            gtp.calibrate_answer(int(row["题号"]), val)
-                    st.session_state.golden_answers = gtp.answers
-                    st.success(f"已保存 {len(gtp.answers)} 题标准答案")
+                            std_tpl.calibrate_answer(int(row["题号"]), val)
+                    st.session_state.template_answers = std_tpl.answers
+                    st.success(f"已保存 {len(std_tpl.answers)} 题标准答案")
                     st.rerun()
 
             # 显示未识别题目的调试信息
-            if hasattr(gtp, '_debug_samples') and gtp._debug_samples:
-                unrecognized = [d for d in gtp._debug_samples if d["answer"] is None]
+            if hasattr(std_tpl, '_debug_samples') and std_tpl._debug_samples:
+                unrecognized = [d for d in std_tpl._debug_samples if d["answer"] is None]
                 if unrecognized:
                     with st.expander(f"调试信息：{len(unrecognized)} 题未识别（查看采样值）", expanded=True):
                         lines = []
@@ -550,21 +550,21 @@ with tab1:
                 else:
                     with st.expander("调试信息：全部识别成功", expanded=False):
                         lines = []
-                        for d in gtp._debug_samples[:5]:
+                        for d in std_tpl._debug_samples[:5]:
                             opts_str = " | ".join(f"{o}={v}" for o, v in d["opts"].items())
                             lines.append(
                                 f"Q{d['q']:>2}: ans={d['answer']} best={d['best_opt']}={d['best_val']} "
                                 f"gap={d['gap']} | {opts_str}"
                             )
                         st.code("\n".join(lines), language=None)
-                        if len(gtp._debug_samples) > 5:
-                            st.caption(f"... 共 {len(gtp._debug_samples)} 题")
+                        if len(std_tpl._debug_samples) > 5:
+                            st.caption(f"... 共 {len(std_tpl._debug_samples)} 题")
 
         # 预览气泡覆盖
         with st.expander("查看气泡覆盖预览"):
-            vis = gimg.copy()
+            vis = timg.copy()
             # 画列框边界和内部网格线(2026-06-08 适配 option_axis)
-            for cfg in st.session_state.golden_column_configs:
+            for cfg in st.session_state.template_column_configs:
                 x1, y1, x2, y2 = cfg["x1"], cfg["y1"], cfg["x2"], cfg["y2"]
                 option_axis = cfg.get("option_axis", "x")
                 cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 255), 2)
@@ -581,7 +581,7 @@ with tab1:
                         lx = int(x1 + qi * col_w)
                         cv2.line(vis, (lx, y1), (lx, y2), (0, 255, 255), 1)
             # 画气泡采样点
-            for b in gtp.bubbles:
+            for b in std_tpl.bubbles:
                 cv2.circle(vis, (b["x"], b["y"]), max(4, b["w"] // 2), (0, 255, 0), 2)
                 cv2.line(vis, (b["x"]-3, b["y"]), (b["x"]+3, b["y"]), (0, 0, 255), 2)
                 cv2.line(vis, (b["x"], b["y"]-3), (b["x"], b["y"]+3), (0, 0, 255), 2)
@@ -591,16 +591,16 @@ with tab1:
 # ---------- Tab 2: 批量处理 ----------
 with tab2:
     st.header("批量处理答题卡")
-    st.caption("使用标定的截取区域裁剪图片，并用黄金模板识别选择题答案")
+    st.caption("使用标定的截取区域裁剪图片，并用标准模板识别选择题答案")
 
     has_a = bool(st.session_state.manual_regions_a)
     has_b = bool(st.session_state.manual_regions_b)
-    has_golden = st.session_state.golden_template is not None
+    has_template = st.session_state.standard_template is not None
 
     if not has_a and not has_b:
         st.warning("请先在「模板与参考」页面标定截取区域")
-    elif not has_golden:
-        st.warning("请先在「模板与参考」页面第三步「黄金模板标定」中生成黄金模板")
+    elif not has_template:
+        st.warning("请先在「模板与参考」页面第三步「标准模板标定」中生成标准模板")
     else:
         col_status = st.columns(3)
         with col_status[0]:
@@ -608,16 +608,16 @@ with tab2:
         with col_status[1]:
             st.success(f"B面 {len(st.session_state.manual_regions_b)} 个区域")
         with col_status[2]:
-            st.success(f"黄金模板 {len(st.session_state.golden_answers)} 题答案")
+            st.success(f"标准模板 {len(st.session_state.template_answers)} 题答案")
 
         # mc_side 状态显示 + 错配警告(防止用户没切 radio 导致 0 识别)
         mc_side = st.session_state.mc_side
         if mc_side == "A" and not has_a and has_b:
-            st.error("❌ Tab1 设置了「选择题在 A 面」,但 A 面 0 个区域 — 识别会全部失败!请回 Tab1 「2.黄金模板标定」顶部切到 **B 面**。")
+            st.error("❌ Tab1 设置了「选择题在 A 面」,但 A 面 0 个区域 — 识别会全部失败!请回 Tab1 「2.标准模板标定」顶部切到 **B 面**。")
         elif mc_side == "B" and not has_b and has_a:
-            st.error("❌ Tab1 设置了「选择题在 B 面」,但 B 面 0 个区域 — 识别会全部失败!请回 Tab1 「2.黄金模板标定」顶部切到 **A 面**。")
+            st.error("❌ Tab1 设置了「选择题在 B 面」,但 B 面 0 个区域 — 识别会全部失败!请回 Tab1 「2.标准模板标定」顶部切到 **A 面**。")
         else:
-            st.info(f"📍 选择题识别目标: **{mc_side}面**  (Tab1 「2.黄金模板标定」顶部可切换)")
+            st.info(f"📍 选择题识别目标: **{mc_side}面**  (Tab1 「2.标准模板标定」顶部可切换)")
 
         uploaded = st.file_uploader("上传答题卡图片（A+B配对，文件名需对应如 `xxx01A.jpg` / `xxx01B.jpg`）",
                                     type=["jpg", "jpeg", "png"], accept_multiple_files=True, key="batch_unified")
@@ -645,7 +645,7 @@ with tab2:
             debug_mode = st.checkbox("调试模式（输出每题详细采样值）", key="debug_unified")
 
             if st.button("开始处理", type="primary"):
-                gtp = st.session_state.golden_template
+                std_tpl =st.session_state.standard_template
                 output_dir = os.path.join("output", "batch")
                 results = []
                 crop_summary = []
@@ -674,8 +674,8 @@ with tab2:
                     if img_target is None:
                         return None
 
-                    # 1. 黄金模板识别选择题 — 按 recognize_side 选图
-                    recognizer = make_recognizer("golden", golden_template=gtp)
+                    # 1. 标准模板识别选择题 — 按 recognize_side 选图
+                    recognizer = make_recognizer("standard", standard_template=std_tpl)
                     result = recognizer.recognize(
                         img_target,
                         RecognizeContext(standard_answers=st.session_state.standard_answers),
@@ -690,11 +690,11 @@ with tab2:
                     os.makedirs(output_dir, exist_ok=True)
                     preview = img_target.copy()
                     h_p, w_p = preview.shape[:2]
-                    gt_img = gtp.image
+                    gt_img = std_tpl.image
                     gt_h, gt_w = gt_img.shape[:2]
-                    for b in gtp.bubbles:
+                    for b in std_tpl.bubbles:
                         q, opt = b["q"], b["opt"]
-                        # 坐标从黄金模板尺寸缩放到实际图像尺寸
+                        # 坐标从标准模板尺寸缩放到实际图像尺寸
                         sx = int(b["x"] * w_p / gt_w)
                         sy = int(b["y"] * h_p / gt_h)
                         ans_info = r["answers"].get(q, {})
@@ -708,13 +708,13 @@ with tab2:
                         else:
                             color = (180, 180, 180)  # 灰色
                         cv2.circle(preview, (sx, sy), 6, color, 2 if is_detected else 1)
-                    preview_path = os.path.join(output_dir, f"{key}_golden_preview_{recognize_side}.png")
+                    preview_path = os.path.join(output_dir, f"{key}_template_preview_{recognize_side}.png")
                     _, png_buf = cv2.imencode(".png", preview)
                     with open(preview_path, "wb") as pf:
                         pf.write(png_buf)
                     r["_preview_path"] = preview_path
 
-                    # 2. 计分（与黄金答案对比）
+                    # 2. 计分（与标准答案对比）
                     correct = 0
                     total_q = r["total"]
                     for ans in r["answers"].values():
@@ -895,10 +895,10 @@ with tab3:
             if result.get("_is_blank"):
                 st.warning("该试卷识别率低于50%，判定为白卷，得分已置为0")
 
-            # 黄金模板识别预览图
+            # 标准模板识别预览图
             preview_path = result.get("_preview_path")
             if preview_path and os.path.exists(preview_path):
-                with st.expander("🔍 黄金模板识别预览（绿色=已识别选项，灰色=未识别，蓝色=多选）", expanded=False):
+                with st.expander("🔍 标准模板识别预览（绿色=已识别选项，灰色=未识别，蓝色=多选）", expanded=False):
                     st.image(preview_path, use_column_width=True)
 
             # 调试信息
@@ -918,7 +918,7 @@ with tab3:
                 auto_display = auto_ans if auto_ans else "(未识别)"
                 if ans_info.get("status") == "multi":
                     auto_display += "(多选)"
-                std = st.session_state.golden_answers.get(q, "")
+                std = st.session_state.template_answers.get(q, "")
                 corrected = corrections.get(q)
 
                 corr = ans_info.get("correct")
@@ -947,7 +947,7 @@ with tab3:
                 },
                 hide_index=True,
                 height=500,
-                key="golden_result_editor",
+                key="template_result_editor",
             )
 
             new_corr = {}
@@ -957,10 +957,10 @@ with tab3:
             st.session_state.manual_corrections[sid] = new_corr
 
             # 基于人工修正重新计分
-            golden_ans = st.session_state.golden_answers
+            template_ans = st.session_state.template_answers
             # 构造 effective_answers: 人工修正优先,否则用识别器结果
             effective_answers = {}
-            for q, std_ans in golden_ans.items():
+            for q, std_ans in template_ans.items():
                 corrected = new_corr.get(q)
                 if corrected:
                     effective_answers[q] = {"answer": corrected, "status": "single"}
@@ -970,7 +970,7 @@ with tab3:
                         "answer": ans_info.get("answer"),
                         "status": ans_info.get("status", "empty"),
                     }
-            score_result = calc_total_score(effective_answers, golden_ans, ScoringConfig())
+            score_result = calc_total_score(effective_answers, template_ans, ScoringConfig())
             sc = score_result["total"]
             tot = score_result["total_full"]
             st.metric("选择题最终得分", f"{sc} / {tot}")
