@@ -356,7 +356,7 @@ with tab1:
         MAX_CANVAS_WIDTH = 1500
         t_canvas_scale = MAX_CANVAS_WIDTH / tw
         t_display_w = MAX_CANVAS_WIDTH
-        t_display_h = int(gh * t_canvas_scale)
+        t_display_h = int(th * t_canvas_scale)
 
         t_bg = Image.fromarray(cv2.cvtColor(timg, cv2.COLOR_BGR2RGB))
         t_bg = t_bg.convert("RGBA")
@@ -365,7 +365,7 @@ with tab1:
         st.markdown("**画列框**：在图片上拖拽画出每列选择题的矩形区域")
         st.caption("从左到右依次画框，每个框围住一列选择题的所有气泡")
 
-        g_canvas_ver = st.session_state.get("template_canvas_ver", 0)
+        t_canvas_ver = st.session_state.get("template_canvas_ver", 0)
 
         # 把已存列框(原图坐标)按当前画布 scale 反向缩放,回显到画布
         # 这样:换画布宽度后之前画的框依然在原位,不需要从头画
@@ -399,7 +399,7 @@ with tab1:
             width=t_display_w,
             drawing_mode="rect",
             initial_drawing=initial_drawing,
-            key=f"template_canvas_{g_canvas_ver}",
+            key=f"template_canvas_{t_canvas_ver}",
             update_streamlit=True,
         )
 
@@ -424,12 +424,12 @@ with tab1:
                                 "y2": int((obj["top"] + obj["height"]) / t_canvas_scale),
                             })
                         st.session_state.template_column_boxes = boxes
-                        st.session_state.template_canvas_ver = g_canvas_ver + 1
+                        st.session_state.template_canvas_ver = t_canvas_ver + 1
                         st.success(f"已提取 {len(boxes)} 个列框")
                         st.rerun()
         with col_clr:
             if st.button("清空画布", key="template_clear"):
-                st.session_state.template_canvas_ver = g_canvas_ver + 1
+                st.session_state.template_canvas_ver = t_canvas_ver + 1
                 st.session_state.template_column_boxes = []
                 st.session_state.template_column_configs = []
                 st.rerun()

@@ -44,6 +44,12 @@ output/
 .DS_Store
 Thumbs.db
 
+# Docker image export
+*.tar
+
+# Test data archives
+testPaper/*.zip
+
 # Tool / session artifacts (Claude / CodeGraph / Cursor / YOLO training output)
 .claude/
 .codegraph/
