@@ -591,31 +591,35 @@ with tab1:
 # ---------- Tab 2: 批量处理 ----------
 with tab2:
     st.header("批量处理答题卡")
-    st.caption("使用标定的截取区域裁剪图片，并用标准模板识别选择题答案")
+    st.caption("使用标准模板识别选择题答案，可选：手动截取区域裁剪非选择题")
 
     has_a = bool(st.session_state.manual_regions_a)
     has_b = bool(st.session_state.manual_regions_b)
     has_template = st.session_state.standard_template is not None
 
-    if not has_a and not has_b:
-        st.warning("请先在「模板与参考」页面标定截取区域")
-    elif not has_template:
-        st.warning("请先在「模板与参考」页面第三步「标准模板标定」中生成标准模板")
+    if not has_template:
+        st.warning("请先在「模板与参考」页面「2.标准模板标定」中生成标准模板")
     else:
         col_status = st.columns(3)
         with col_status[0]:
-            st.success(f"A面 {len(st.session_state.manual_regions_a)} 个区域")
+            if has_a:
+                st.success(f"A面 {len(st.session_state.manual_regions_a)} 个截取区域")
+            else:
+                st.info("A面 无截取区域（仅识别选择题）")
         with col_status[1]:
-            st.success(f"B面 {len(st.session_state.manual_regions_b)} 个区域")
+            if has_b:
+                st.success(f"B面 {len(st.session_state.manual_regions_b)} 个截取区域")
+            else:
+                st.info("B面 无截取区域（仅识别选择题）")
         with col_status[2]:
             st.success(f"标准模板 {len(st.session_state.template_answers)} 题答案")
 
-        # mc_side 状态显示 + 错配警告(防止用户没切 radio 导致 0 识别)
+        # mc_side 状态显示 + 错配警告(降级为 warning, 不阻塞只识别选择题的场景)
         mc_side = st.session_state.mc_side
         if mc_side == "A" and not has_a and has_b:
-            st.error("❌ Tab1 设置了「选择题在 A 面」,但 A 面 0 个区域 — 识别会全部失败!请回 Tab1 「2.标准模板标定」顶部切到 **B 面**。")
+            st.warning("⚠️ Tab1 设置了「选择题在 A 面」,但 A 面无截取区域（B 面有）— 非选择题裁剪仅对 B 面生效。如需裁剪 A 面，请在 Tab1「1.手动标定截取区域」中为 A 面配置区域。")
         elif mc_side == "B" and not has_b and has_a:
-            st.error("❌ Tab1 设置了「选择题在 B 面」,但 B 面 0 个区域 — 识别会全部失败!请回 Tab1 「2.标准模板标定」顶部切到 **A 面**。")
+            st.warning("⚠️ Tab1 设置了「选择题在 B 面」,但 B 面无截取区域（A 面有）— 非选择题裁剪仅对 A 面生效。如需裁剪 B 面，请在 Tab1「1.手动标定截取区域」中为 B 面配置区域。")
         else:
             st.info(f"📍 选择题识别目标: **{mc_side}面**  (Tab1 「2.标准模板标定」顶部可切换)")
 
