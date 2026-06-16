@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Git
+.git/
+.gitignore
+
+# Output / temp
+output/
+*.log
+*.jpg
+*.jpeg
+*.png
+
+# Streamlit
+.streamlit/*.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tool artifacts
+.claude/
+.codegraph/
+.cursor/
+.tmp/
+runs/
+
+# Docs
+docs/
+*.md
+!README.md
+
+# Test images/papers
+testPaper/
+omr_demo/output/
+omr_demo/*.jpg
+
+# Devcontainer
+.devcontainer/
