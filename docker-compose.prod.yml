@@ -1,0 +1,19 @@
+# ============================================================
+# 生产环境 compose 文件 — 使用预构建镜像，不在服务器上编译
+# 用法: docker compose -f docker-compose.prod.yml up -d
+# ============================================================
+version: "3.8"
+
+services:
+  omr-service:
+    image: omr-service:latest    # 使用本地已加载的镜像，不构建
+    container_name: omr-service
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./output:/app/output
+      - ./omr_demo/templates:/app/omr_demo/templates
+    environment:
+      - TZ=Asia/Shanghai
+      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=50

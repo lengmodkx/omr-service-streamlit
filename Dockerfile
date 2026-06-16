@@ -13,12 +13,15 @@ LABEL description="OMR答题卡识别系统 - Streamlit（无YOLO轻量版）"
 # zlib1g-dev: 压缩支持
 # libgl1:     OpenCV 兜底 GL 库（headless 不需要但以防万一）
 # libgomp1:   OpenCV 并行运行时
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libzbar0 \
-    libjpeg-dev \
-    zlib1g-dev \
-    libgl1 \
-    libgomp1 \
+# 切换 Debian 源为国内镜像（避免官方源 502/超时）
+RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.ustc.edu.cn/debian|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libzbar0 \
+        libjpeg-dev \
+        zlib1g-dev \
+        libgl1 \
+        libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Python 依赖 ----
