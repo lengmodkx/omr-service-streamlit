@@ -1,0 +1,463 @@
+"""
+标准模板对比法 — 核心类
+用一张正确填涂的答题卡同时充当定位基准和标准答案
+"""
+import cv2
+import numpy as np
+from typing import Dict, List, Tuple
+
+
+class StandardTemplate:
+    """正确填涂答题卡的标准模板"""
+
+    def __init__(self, image: np.ndarray, column_configs: List[Dict]):
+        self.image = image
+        self.column_configs = column_configs
+        self.bubbles = []
+        self.answers = {}
+
+        for cfg in column_configs:
+            col_bubbles = self._generate_grid(cfg)
+            self.bubbles.extend(col_bubbles)
+
+        if image is not None:
+            self._calibrate_positions(image)
+            self._auto_detect_answers(image)
+
+    @staticmethod
+    def _generate_grid(cfg: Dict) -> List[Dict]:
+        """根据列框配置均匀切分，返回该列所有气泡坐标
+
+        option_axis (2026-06-08 新增):
+        - "x" (默认): 选项在 x 轴、题号在 y 轴 —— 标准"竖排题"模板
+        - "y":        选项在 y 轴、题号在 x 轴 —— OMR0002 蒙文答题卡等"横排题"模板
+                       (用户画的列框是扁宽的,题号 Q1/Q2/... 从左到右,选项 A/B/... 从上到下)
+
+        reverse_q (2026-06-04 新增):
+        - True: Q1 放在题号轴末端 (option_axis="x" → y2 端; option_axis="y" → x2 端)
+        - False (默认): Q1 放在题号轴起点
+        """
+        x1, y1 = cfg["x1"], cfg["y1"]
+        x2, y2 = cfg["x2"], cfg["y2"]
+        start_q = cfg["start_q"]
+        num_q = cfg["num_q"]
+        num_options = cfg["num_options"]
+        reverse_q = cfg.get("reverse_q", False)  # 2026-06-04 新增
+        option_axis = cfg.get("option_axis", "x")  # 2026-06-08 新增
+
+        if option_axis == "x":
+            # 标准:选项在 x 轴、题号在 y 轴
+            col_w = (x2 - x1) / num_options
+            row_h = (y2 - y1) / num_q
+            bubble_w = max(8, int(col_w * 0.5))
+            bubble_h = max(8, int(row_h * 0.5))
+            strict_axis = "y"  # 题目轴是 y,校准严格(防被相邻题号/印刷线吸走)
+
+            bubbles = []
+            for qi in range(num_q):
+                qn = start_q + qi
+                # 倒序时: qi=0 (Q1) 在 y2 端(最下), qi=last 在 y1 端(最上)
+                row_idx = (num_q - 1 - qi) if reverse_q else qi
+                cy = int(y1 + row_idx * row_h + row_h / 2)
+                for oi in range(num_options):
+                    opt = chr(ord("A") + oi)
+                    cx = int(x1 + oi * col_w + col_w / 2)
+                    bubbles.append({
+                        "q": qn,
+                        "opt": opt,
+                        "x": cx,
+                        "y": cy,
+                        "w": bubble_w,
+                        "h": bubble_h,
+                        "_strict_axis": strict_axis,
+                    })
+        else:  # option_axis == "y"
+            # 横排题:选项在 y 轴、题号在 x 轴
+            # x 轴被 num_q 切分 → 每列一个问题
+            # y 轴被 num_options 切分 → 每行一个选项
+            col_w = (x2 - x1) / num_q
+            row_h = (y2 - y1) / num_options
+            bubble_w = max(8, int(col_w * 0.5))
+            bubble_h = max(8, int(row_h * 0.5))
+            strict_axis = "x"  # 题目轴是 x,校准严格(防被相邻列题号/印刷线吸走)
+
+            bubbles = []
+            for oi in range(num_options):
+                opt = chr(ord("A") + oi)
+                # 选项始终 A 在最上、D 在最下(不因 reverse_q 翻转,否则 ABCD 排错)
+                cy = int(y1 + oi * row_h + row_h / 2)
+                for qi in range(num_q):
+                    qn = start_q + qi
+                    # 倒序时: qi=0 (Q1) 在 x2 端(最右), qi=last 在 x1 端(最左)
+                    col_idx = (num_q - 1 - qi) if reverse_q else qi
+                    cx = int(x1 + col_idx * col_w + col_w / 2)
+                    bubbles.append({
+                        "q": qn,
+                        "opt": opt,
+                        "x": cx,
+                        "y": cy,
+                        "w": bubble_w,
+                        "h": bubble_h,
+                        "_strict_axis": strict_axis,
+                    })
+        return bubbles
+
+    def _auto_detect_answers(self, image: np.ndarray):
+        """对标准模板自身采样暗度，自动识别标准答案
+        2026-06-04 重构: 改用 _classify_answer 静态方法(支持 multi),避免老逻辑漏判多选
+        原 OMR0026 Q1 真填涂 AC,但老逻辑 best_delta<9 直接返回 A(丢 C)
+        """
+        if image is None:
+            return
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        h, w = gray.shape
+
+        q_groups = {}
+        for b in self.bubbles:
+            q = b["q"]
+            opt = b["opt"]
+            mean_g = self._sample_bubble(blurred, b["x"], b["y"], b["w"], b["h"], w, h, auto_tune=True)
+            q_groups.setdefault(q, {})[opt] = mean_g
+
+        self._debug_samples = []  # 存储每题的采样详情
+        for q, opts in q_groups.items():
+            sorted_opts = sorted(opts.items(), key=lambda x: x[1])
+
+            # 2026-06-04 改用 _classify_answer 统一识别(支持 multi + 浅填涂 + 各种边界)
+            classification = self._classify_answer(sorted_opts)
+            ans = classification["answer"]
+
+            # uncertain 时回退 None,让用户在 Tab1 人工修正
+            if classification["status"] == "uncertain":
+                ans = None
+
+            self.answers[q] = ans
+
+            # 收集调试信息(原样保留,方便 Tab1 显示采样值)
+            best_opt, best_val = sorted_opts[0] if sorted_opts else ("?", 255)
+            gap = sorted_opts[1][1] - best_val if len(sorted_opts) > 1 else 0
+            mean_val = sum(v for _, v in sorted_opts) / len(sorted_opts) if sorted_opts else 0
+            self._debug_samples.append({
+                "q": q, "answer": self.answers[q],
+                "best_opt": best_opt, "best_val": round(best_val, 1),
+                "gap": round(gap, 1), "mean_val": round(mean_val, 1),
+                "opts": {o: round(v, 1) for o, v in sorted_opts},
+            })
+
+    def _calibrate_positions(self, image: np.ndarray):
+        """局部搜索校准：在初始网格位置附近搜索最暗点，修正到真实气泡圆心。
+        题目轴方向严格（±2px），防止被相邻题号/印刷线吸走；
+        选项轴方向宽松（±25% 半径），允许修正选项列偏移。
+        2026-06-08 改造:严格轴随 option_axis 切换(默认 y,横排题时切到 x)。
+        """
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        h, w = gray.shape
+
+        for b in self.bubbles:
+            strict_axis = b.get("_strict_axis", "y")  # 默认 y 严格(老模板兼容)
+            r_loose = max(3, int(min(b["w"], b["h"]) * 0.25))
+            r_strict = 2
+            if strict_axis == "y":
+                sx, sy = r_loose, r_strict
+            else:  # strict_axis == "x"
+                sx, sy = r_strict, r_loose
+
+            x1 = max(0, b["x"] - sx)
+            y1 = max(0, b["y"] - sy)
+            x2 = min(w, b["x"] + sx)
+            y2 = min(h, b["y"] + sy)
+            roi = blurred[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+            _, _, min_loc, _ = cv2.minMaxLoc(roi)
+            new_x = x1 + min_loc[0]
+            new_y = y1 + min_loc[1]
+
+            # 题目轴（严格）只允许 ±2px 微调；选项轴（宽松）自由调整
+            if strict_axis == "y":
+                b["x"] = new_x
+                if abs(new_y - b["y"]) <= 3:
+                    b["y"] = new_y
+            else:
+                if abs(new_x - b["x"]) <= 3:
+                    b["x"] = new_x
+                b["y"] = new_y
+
+    @staticmethod
+    def _sample_bubble(blurred: np.ndarray, bx: int, by: int,
+                       bw: int, bh: int, img_w: int, img_h: int,
+                       auto_tune: bool = False) -> float:
+        """采样气泡中心暗度。小窗口聚焦圆心（避开印刷轮廓圈），返回均值灰度。"""
+        cx, cy = bx, by
+        if auto_tune:
+            # 2026-06-04 优化: 15%→40%→60%
+            # 解决"填涂轻微偏移时校准采样点漂到框线上"问题
+            # (OMR0007 数学卷 Q2:C 灰度 143→186 误判 uncertain 即此问题)
+            # 60% 半径(对 w=12 气泡=7px)远小于列中心距的一半(数学卷 ~21px,政治卷 ~38px),不会跨列
+            # 60% 覆盖了 ECC 对齐后填涂中心可能偏移 ±5px 的边界 case
+            tune_r = max(2, int(min(bw, bh) * 0.60))
+            tx1 = max(0, cx - tune_r)
+            ty1 = max(0, cy - tune_r)
+            tx2 = min(img_w, cx + tune_r)
+            ty2 = min(img_h, cy + tune_r)
+            troi = blurred[ty1:ty2, tx1:tx2]
+            if troi.size > 0:
+                _, _, min_loc, _ = cv2.minMaxLoc(troi)
+                cx = tx1 + min_loc[0]
+                cy = ty1 + min_loc[1]
+
+        # 小窗口：仅取气泡中心30%，轮廓在边缘（离心10+px），不会进入窗口
+        half_w = max(4, int(bw * 0.30))
+        half_h = max(4, int(bh * 0.30))
+        x1 = max(0, cx - half_w)
+        y1 = max(0, cy - half_h)
+        x2 = min(img_w, cx + half_w)
+        y2 = min(img_h, cy + half_h)
+        roi = blurred[y1:y2, x1:x2]
+        if roi.size == 0:
+            return 255.0
+        return float(np.mean(roi))
+
+    @staticmethod
+    def align(ref_roi: np.ndarray, target_roi: np.ndarray) -> Tuple[np.ndarray, bool]:
+        """ECC像素级对齐，返回 (对齐后的ROI, 是否成功)"""
+        if ref_roi is None or ref_roi.size == 0 or target_roi is None or target_roi.size == 0:
+            return target_roi, False
+        
+        ref_gray = cv2.cvtColor(ref_roi, cv2.COLOR_BGR2GRAY) if len(ref_roi.shape) == 3 else ref_roi
+        tgt_gray = cv2.cvtColor(target_roi, cv2.COLOR_BGR2GRAY) if len(target_roi.shape) == 3 else target_roi
+
+        if ref_gray.shape != tgt_gray.shape:
+            tgt_gray = cv2.resize(tgt_gray, (ref_gray.shape[1], ref_gray.shape[0]))
+        
+        # 安全检查：图像尺寸必须大于高斯核
+        if ref_gray.shape[0] < 5 or ref_gray.shape[1] < 5:
+            return tgt_gray, False
+
+        ref_blur = cv2.GaussianBlur(ref_gray, (5, 5), 0)
+        tgt_blur = cv2.GaussianBlur(tgt_gray, (5, 5), 0)
+
+        warp_matrix = np.eye(2, 3, dtype=np.float32)
+        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-6)
+
+        try:
+            _, warp_matrix = cv2.findTransformECC(
+                ref_blur, tgt_blur, warp_matrix,
+                cv2.MOTION_EUCLIDEAN, criteria
+            )
+            aligned = cv2.warpAffine(
+                tgt_blur, warp_matrix, (ref_blur.shape[1], ref_blur.shape[0]),
+                flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP
+            )
+            return aligned, True
+        except cv2.error:
+            return tgt_blur, False
+
+    @staticmethod
+    def _classify_answer(sorted_opts: List[Tuple[str, float]]) -> Dict:
+        """根据题目各选项灰度判定答案状态 — 纯函数,易测
+
+        输入: 按灰度升序排列的 [(opt, gray_val), ...] 列表
+        输出: {"answer": str|None, "status": "single"|"multi"|"empty"|"uncertain"}
+
+        判定路径(顺序匹配,首中即返回):
+        1. 防线1 亮纸-浅差: 全部偏亮且接近且最暗项也不暗 → empty
+        2. 防线2 多涂: 多个暗项 → multi
+        3. 防线3 明显暗: best 显著暗于其他 → single
+        4. 防线3b 浅填涂: 浅差异但纸张较暗 → single
+        5. 模糊: 以上都不满足 → uncertain (建议人工核对)
+
+        阈值说明(2026-06 优化):
+        - 防线1 best_delta 阈值: 8 → 4
+        - 旧阈值会把 Q16 这类"纸张亮 + 浅填涂 + best_delta≈6"误判为 empty
+        - 新阈值让 borderline case 落到 uncertain,进人工核对面板
+        - 2026-06-04 加固: 防线3/3b 加 best_val 绝对暗度门槛,防止印刷线/伪影
+          被判为单选(空卷误识别 30% → 0%)
+        """
+        if not sorted_opts:
+            return {"answer": None, "status": "empty"}
+
+        best_opt, best_val = sorted_opts[0]
+        second_val = sorted_opts[1][1] if len(sorted_opts) > 1 else 255
+        all_vals = [v for _, v in sorted_opts]
+
+        # 相对阈值:基于本题内部各选项的相对暗度,适应不同扫描亮度
+        other_mean = sum(v for _, v in sorted_opts[1:]) / (len(sorted_opts) - 1) if len(sorted_opts) > 1 else 255
+        best_delta = other_mean - best_val    # best 比其他选项均值暗多少
+        gap = second_val - best_val
+        mean_val = sum(all_vals) / len(all_vals)
+        range_val = sorted_opts[-1][1] - sorted_opts[0][1]
+
+        # 多涂检测: 相对(明显低于其他均值)或 绝对(多个极暗)双保险
+        # 2026-06-08 放宽: 150→170 / 140→160
+        # 修复 OMR0002 14A Q9 真实多涂(A=156, C=159)被旧阈值漏判
+        # 旧阈值 v<150 让两个 156/159 都被排掉,导致 dark_count=0 落到防线3 误判 single
+        dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 170)
+        abs_dark = sum(1 for v in all_vals if v < 160)  # 处理全体偏暗的极端情况
+        # 收集所有填涂的选项(用于多选题显示),与上方检测口径一致
+        dark_opts = sorted([o for o, v in sorted_opts if (other_mean - v > 24 and v < 170) or v < 160])
+        # 空白信号: ≥2 个其他选项是真正纯白(>=254)时,允许 best 略有差异不判 empty
+        # 用于防线1 豁免,避免"大部分选项 248~252,best=240"的浅填涂被误判为空
+        strong_white = sum(1 for v in all_vals if v >= 254)
+
+        # 防线1: 全部偏亮且接近且最暗项也不暗(且无明显填涂信号) → 未填涂
+        # 收紧 best_delta 阈值 8→4: 防止浅填涂(best_val>210)被误判为空题
+        # 例外: ≥2 个其他选项是真正纯白(>=254)时,允许 best 略有差异(2+)不判 empty
+        # 2026-06-08 加固: best_val > 200 时,放宽 best_delta 阈值 4→15
+        # 修复 OMR0002 11A/12A 空卷误识: ECC 偏后 best_val=206 触发防线3 误判 single
+        # 逻辑: 真填涂 best_val 都 < 200(暗),空卷 best_val > 200(亮),best_val > 200 时
+        #       即便 best_delta 达 12-15 也只是题号印刷线/扫描噪声,应判 empty
+        if (mean_val > 200 and range_val < 30 and best_val > 200
+                and ((best_val > 210 and best_delta < 4) or (best_val <= 210 and best_delta < 15))
+                and not (strong_white >= 2 and best_delta > 2)):
+            return {"answer": None, "status": "empty"}
+        # 防线2: 两个以上暗 → 多选
+        # 2026-06-04 调整 gap 阈值 30→40: 覆盖 "C+D 双重填涂但 D 偏深 C 偏浅" 的边界 case
+        # (OMR0013 21A Q12:D=110 C=142 gap=32, 旧阈值会漏判多选)
+        # abs_dark 仅在整体偏暗时(mean<130)启用,避免正常亮度下误判
+        elif (dark_count >= 2 and gap <= 40) or (abs_dark >= 2 and gap <= 20 and mean_val < 130):
+            return {"answer": "".join(dark_opts) if dark_opts else best_opt, "status": "multi"}
+        # 防线3 统一规则 (2026-06-04 合并原防线3 + 防线3b 分支1):
+        # 核心: best_delta > 12 + gap > 5 (相对暗度+集中度,挡住印刷线/扫描噪声)
+        # 兜底: best_val < 200 + range_val > 15 (整体有真实填涂才能形成大range)
+        # 原因: 之前 best_val<185→190→195 反复提仍挡不住 ECC 偏移后的浅填涂
+        # (14A Q11:B=193, 03A Q1:C=189), 改靠 delta+gap 把关更鲁棒
+        if (best_val < 215
+                and best_delta > 12
+                and gap > 5
+                and range_val > 15):
+            return {"answer": best_opt, "status": "single"}
+        # 模糊
+        else:
+            return {"answer": None, "status": "uncertain"}
+
+    def recognize(self, target_img: np.ndarray, debug: bool = False) -> Dict:
+        """主入口：全局ECC对齐 → 采样 → 判断 → 对比标准答案。
+        设置 debug=True 打印每题的详细采样值，用于诊断识别失败原因。"""
+        # 安全检查：防止零尺寸或无效图像导致 OpenCV 底层崩溃
+        if target_img is None or target_img.size == 0:
+            return {
+                "answers": {},
+                "total": 0,
+                "empty_count": 0,
+                "multi_count": 0,
+                "card_flag": "invalid_image",
+                "debug_lines": ["错误：输入图像为空或解码失败"],
+            }
+        
+        gray = cv2.cvtColor(target_img, cv2.COLOR_BGR2GRAY) if len(target_img.shape) == 3 else target_img
+        
+        # 额外安全检查：图像尺寸必须大于高斯核
+        if gray.shape[0] < 5 or gray.shape[1] < 5:
+            return {
+                "answers": {},
+                "total": 0,
+                "empty_count": 0,
+                "multi_count": 0,
+                "card_flag": "invalid_image",
+                "debug_lines": [f"错误：图像尺寸过小 {gray.shape}"],
+            }
+        
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        h, w = gray.shape
+
+        # 全局ECC对齐：将待识别卡片对齐到标准模板，消除扫描偏移
+        if self.image is not None:
+            ref_gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY) if len(self.image.shape) == 3 else self.image
+            ref_blur = cv2.GaussianBlur(ref_gray, (5, 5), 0)
+            if blurred.shape != ref_blur.shape:
+                blurred = cv2.resize(blurred, (ref_blur.shape[1], ref_blur.shape[0]))
+            warp_matrix = np.eye(2, 3, dtype=np.float32)
+            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-6)
+            try:
+                _, warp_matrix = cv2.findTransformECC(
+                    ref_blur, blurred, warp_matrix,
+                    cv2.MOTION_EUCLIDEAN, criteria
+                )
+                blurred = cv2.warpAffine(
+                    blurred, warp_matrix, (ref_blur.shape[1], ref_blur.shape[0]),
+                    flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP
+                )
+                h, w = ref_blur.shape
+            except cv2.error:
+                pass  # 对齐失败则使用原始图像
+
+        q_groups = {}
+        for b in self.bubbles:
+            q = b["q"]
+            opt = b["opt"]
+            mean_g = self._sample_bubble(blurred, b["x"], b["y"], b["w"], b["h"], w, h,
+                                         auto_tune=True)
+            q_groups.setdefault(q, {})[opt] = mean_g
+
+        answers = {}
+        total = len(q_groups)
+        multi_count = 0
+        empty_count = 0
+        debug_lines = []  # 收集调试信息
+
+        for q, opts in q_groups.items():
+            sorted_opts = sorted(opts.items(), key=lambda x: x[1])
+            std_ans = self.answers.get(q)
+
+            # 调用纯函数判定(防线1-3b + uncertain)— 顺序已在 _classify_answer 内固定
+            classification = self._classify_answer(sorted_opts)
+            answers[q] = {
+                "answer": classification["answer"],
+                "status": classification["status"],
+            }
+            if classification["status"] == "empty":
+                empty_count += 1
+            elif classification["status"] == "multi":
+                multi_count += 1
+
+            # 复算 _classify_answer 内部已用的关键变量(用于 debug 输出)
+            best_opt, best_val = sorted_opts[0] if sorted_opts else ("?", 255)
+            second_val = sorted_opts[1][1] if len(sorted_opts) > 1 else 255
+            all_vals = [v for _, v in sorted_opts]
+            other_mean = sum(v for _, v in sorted_opts[1:]) / (len(sorted_opts) - 1) if len(sorted_opts) > 1 else 255
+            gap = second_val - best_val
+            mean_val = sum(all_vals) / len(all_vals) if all_vals else 255
+            dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 150)
+
+            # 与标准答案对比（多选题按字符集比较，顺序无关）
+            ans = answers[q]["answer"]
+            if ans and std_ans:
+                if answers[q]["status"] == "multi":
+                    answers[q]["correct"] = (set(ans) == set(std_ans))
+                else:
+                    answers[q]["correct"] = (ans == std_ans)
+            else:
+                answers[q]["correct"] = None
+
+            # 调试输出：非 single 状态的题目打印详细采样值
+            if debug and answers[q]["status"] != "single":
+                line = (f"Q{q:>2}: best={best_opt}={best_val:.0f} gap={gap:.0f} "
+                        f"mean={mean_val:.0f} darkCnt={dark_count} status={answers[q]['status']} "
+                        f"opts=[{','.join(f'{o}:{v:.0f}' for o,v in sorted_opts)}]")
+                print(line)
+                debug_lines.append(line)
+
+        # 卡片级检查
+        card_flag = None
+        if total > 0:
+            if multi_count / total > 0.5:
+                card_flag = "abnormal"
+            elif empty_count / total > 0.8:
+                card_flag = "suspicious_blank"
+
+        return {
+            "answers": answers,
+            "total": total,
+            "empty_count": empty_count,
+            "multi_count": multi_count,
+            "card_flag": card_flag,
+            "debug_lines": debug_lines,
+        }
+
+    def calibrate_answer(self, q: int, correct_opt: str):
+        """人工修正标准答案"""
+        self.answers[q] = correct_opt

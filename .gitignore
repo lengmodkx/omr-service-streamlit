@@ -21,10 +21,10 @@ wheels/
 *.egg
 
 # Virtual environments
+.venv/
 venv/
 ENV/
 env/
-.venv
 
 # IDE
 .vscode/
@@ -36,9 +36,7 @@ env/
 # Output / temp files
 output/
 *.log
-
-# Streamlit
-.streamlit/*.db
+.env
 
 # OS
 .DS_Store
@@ -50,7 +48,7 @@ Thumbs.db
 # Test data archives
 testPaper/*.zip
 
-# Tool / session artifacts (Claude / CodeGraph / Cursor / YOLO training output)
+# Tool / session artifacts
 .claude/
 .codegraph/
 .cursor/

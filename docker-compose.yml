@@ -9,15 +9,30 @@ services:
     container_name: omr-service
     restart: unless-stopped
     ports:
-      - "8501:8501"
+      - "20884:20884"
+      - "8080:8080"
     volumes:
-      # 输出目录持久化（裁剪图片、识别结果）
+      # 输出目录持久化
       - ./output:/app/output
-      # 模板目录（可选挂载，便于热更新模板JSON）
-      - ./omr_demo/templates:/app/omr_demo/templates
+      # 模板目录挂载（可选热更新）
+      - ./omr_service/templates:/app/omr_service/templates
     environment:
       - TZ=Asia/Shanghai
-      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=50
+      - OMR_DUBBO_PORT=20884
+      - OMR_HEALTH_PORT=8080
+      - NACOS_SERVER=${NACOS_SERVER:-127.0.0.1:8848}
+      - NACOS_NAMESPACE=${NACOS_NAMESPACE:-public}
+      - NACOS_USERNAME=${NACOS_USERNAME:-}
+      - NACOS_PASSWORD=${NACOS_PASSWORD:-}
+      - NACOS_CONFIG_DATA_ID=${NACOS_CONFIG_DATA_ID:-omr-service.yaml}
+      - NACOS_CONFIG_GROUP=${NACOS_CONFIG_GROUP:-DEFAULT_GROUP}
+      - REDIS_HOST=${REDIS_HOST:-127.0.0.1}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - REDIS_DB=${REDIS_DB:-4}
+      - REDIS_JOB_STREAM=${REDIS_JOB_STREAM:-omr:batch:job}
+      - REDIS_RESULT_STREAM=${REDIS_RESULT_STREAM:-omr:batch:result}
+      - OMR_WORKER_COUNT=${OMR_WORKER_COUNT:-4}
     # 如需限制内存:
     # deploy:
     #   resources:

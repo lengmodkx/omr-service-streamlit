@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+package omr;
+option go_package = "github.com/lengmodkx/omr-service/proto";
+
+// OMR 服务 — 黄金模板解析、识别、成功率验证、复验
+service OmrService {
+  // 解析黄金模板：根据列框配置 + 模板图片，生成气泡网格与标准答案
+  rpc ParseGoldenTemplate(GoldenTemplateRequest) returns (GoldenTemplateResult);
+
+  // 根据黄金模板识别单张答题卡
+  rpc RecognizeByTemplate(RecognizeRequest) returns (RecognizeResult);
+
+  // 验证黄金模板识别成功率（管理端传入已知答案的图片列表）
+  rpc VerifyRecognitionRate(VerifyRateRequest) returns (VerifyRateResult);
+
+  // 单张试卷复验（与 RecognizeByTemplate 等价，语义区分）
+  rpc ReverifyPaper(RecognizeRequest) returns (RecognizeResult);
+}
+
+// 列框配置 — 与 StandardTemplate._generate_grid 参数一一对应
+message ColumnConfig {
+  int32 x1 = 1;
+  int32 y1 = 2;
+  int32 x2 = 3;
+  int32 y2 = 4;
+  int32 start_q = 5;
+  int32 num_q = 6;
+  int32 num_options = 7;
+  string option_axis = 8;  // "x" 选项在 x 轴（竖排题）; "y" 选项在 y 轴（横排题）
+  bool reverse_q = 9;
+}
+
+message GoldenTemplateRequest {
+  int64 template_id = 1;
+  string template_image_url = 2;
+  repeated ColumnConfig columns = 3;
+}
+
+message Bubble {
+  int32 q = 1;
+  string opt = 2;
+  int32 x = 3;
+  int32 y = 4;
+  int32 w = 5;
+  int32 h = 6;
+}
+
+message GoldenTemplateResult {
+  int32 code = 1;
+  string message = 2;
+  int64 template_id = 3;
+  repeated Bubble bubbles = 4;
+  map<int32, string> answers = 5;  // 标准模板自动识别出的答案
+  int32 total = 6;
+}
+
+message RecognizeRequest {
+  int64 template_id = 1;
+  string scan_image_url = 2;
+  int32 question_no = 3;  // 0 表示整张；非 0 表示单题（预留）
+}
+
+message QuestionAnswer {
+  int32 q = 1;
+  string answer = 2;      // 单选 "A" / 多选 "ABC" / 空 ""
+  string status = 3;      // single / multi / empty / uncertain
+  bool correct = 4;
+}
+
+message RecognizeResult {
+  int32 code = 1;
+  string message = 2;
+  int64 template_id = 3;
+  string scan_image_url = 4;
+  repeated QuestionAnswer answers = 5;
+  int32 total = 6;
+  int32 empty_count = 7;
+  int32 multi_count = 8;
+  string card_flag = 9;    // abnormal / suspicious_blank / invalid_image / ""
+  int32 duration_ms = 10;
+}
+
+message VerifyRateRequest {
+  int64 template_id = 1;
+  repeated string image_urls = 2;
+  map<int32, string> expected_answers = 3;  // 管理端给出的标准答案
+}
+
+message VerifyRateResult {
+  int32 code = 1;
+  string message = 2;
+  float success_rate = 3;   // 0.0 ~ 1.0
+  int32 total = 4;
+  int32 matched = 5;
+  repeated RecognizeResult details = 6;
+}

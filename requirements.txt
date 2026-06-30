@@ -1,8 +1,15 @@
-streamlit==1.39.1
 opencv-python-headless>=4.8
 numpy>=1.24
 pandas>=2.0
 pyzbar>=0.1.9
 Pillow>=10.0,<11
 openpyxl>=3.1
-streamlit-drawable-canvas>=0.9
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+redis>=5.0.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+tenacity>=8.0.0
+nacos-sdk-python>=3.2.0
+pydantic>=2.10.4

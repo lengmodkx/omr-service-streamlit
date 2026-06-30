@@ -25,9 +25,6 @@ output/
 *.jpeg
 *.png
 
-# Streamlit
-.streamlit/*.db
-
 # OS
 .DS_Store
 Thumbs.db
@@ -46,8 +43,4 @@ docs/
 
 # Test images/papers
 testPaper/
-omr_demo/output/
-omr_demo/*.jpg
-
-# Devcontainer
-.devcontainer/
+omr_service/output/

@@ -10,10 +10,20 @@ services:
     container_name: omr-service
     restart: unless-stopped
     ports:
-      - "8501:8501"
+      - "20884:20884"
+      - "8080:8080"
     volumes:
       - ./output:/app/output
-      - ./omr_demo/templates:/app/omr_demo/templates
+      - ./omr_service/templates:/app/omr_service/templates
     environment:
       - TZ=Asia/Shanghai
-      - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=50
+      - OMR_DUBBO_PORT=20884
+      - NACOS_SERVER=${NACOS_SERVER:-127.0.0.1:8848}
+      - NACOS_NAMESPACE=${NACOS_NAMESPACE:-public}
+      - NACOS_USERNAME=${NACOS_USERNAME:-}
+      - NACOS_PASSWORD=${NACOS_PASSWORD:-}
+      - RABBITMQ_HOST=${RABBITMQ_HOST:-127.0.0.1}
+      - RABBITMQ_PORT=${RABBITMQ_PORT:-5672}
+      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_PASSWORD=${RABBITMQ_PASSWORD:-guest}
+      - OMR_WORKER_COUNT=${OMR_WORKER_COUNT:-4}
