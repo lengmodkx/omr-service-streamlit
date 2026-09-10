@@ -55,3 +55,11 @@ testPaper/*.zip
 .cursor/
 .tmp/
 runs/
+
+# 本地分析 / 调试产物（一次性，不入库）
+.analysis_tmp/
+.coverage
+htmlcov/
+tmp_*.jpg
+tmp_*.png
+scripts/repro_*.py
