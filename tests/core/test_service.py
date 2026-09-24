@@ -333,7 +333,7 @@ def test_recognize_personal_info_block_fields_flattened(service, mock_deps):
     from omr_service.engine import personal_info_block_parser
 
     orig = personal_info_block_parser.parse_personal_info_block
-    personal_info_block_parser.parse_personal_info_block = lambda t: ({"name": "张三", "room": "1"}, 0.9)
+    personal_info_block_parser.parse_personal_info_block = lambda t, **kwargs: ({"name": "张三", "room": "1"}, 0.9)
     # service 内部 from import，需要打补丁到引擎模块
     try:
         results = service._recognize_personal_info(
@@ -343,7 +343,9 @@ def test_recognize_personal_info_block_fields_flattened(service, mock_deps):
         personal_info_block_parser.parse_personal_info_block = orig
 
     fields = {r["field"]: r["value"] for r in results}
-    assert fields["student_info_block"] == "姓名:张三 考场:1"
+    # 块原文末尾会回写最终姓名的“印刷体姓名”标记行（供 Java 端二次解析对齐）
+    assert fields["student_info_block"].startswith("姓名:张三 考场:1")
+    assert "印刷体姓名:张三" in fields["student_info_block"]
     assert fields["name"] == "张三"
     assert fields["room"] == "1"
 

@@ -32,9 +32,22 @@ _MINOR_LANG_LABELS = ["小语种", "小语档", "小语和", "小语料", "语�
 # 允许粘连取值的姓名标签（OCR 常丢失“姓名：”后的冒号，变成“姓名娜木汗”）
 _GLUED_NAME_LABELS = ["考生姓名", "姓名", "名字"]
 
+# OCR 引擎条码锚定标签条注入的显式标记（可信度最高的印刷体姓名，见 ocr.py recognize_block）
+_MARKED_NAME_LABELS = ["印刷体姓名", "条码姓名"]
 
-def parse_personal_info_block(raw_text: str) -> Tuple[Dict[str, str], float]:
+# OCR 引擎条码解码注入的显式考号标记（pyzbar 解码，比手写/印刷数字 OCR 可靠）
+_BARCODE_NO_LABELS = ["条码考号"]
+
+
+def parse_personal_info_block(raw_text: str,
+                              extra_name_candidates: list = None,
+                              candidate_names: list = None) -> Tuple[Dict[str, str], float]:
     """解析考生信息区 OCR 原始文本。
+
+    Args:
+        raw_text: 考生信息区 OCR 原始文本。
+        extra_name_candidates: OCR 引擎提供的额外姓名候选（条码标签条多变体识别结果）。
+        candidate_names: 该考试的考生名单（花名册），用于对姓名候选做相似度裁决。
 
     Returns:
         (fields, confidence)，fields 包含 name/student_no/exam_no/room/seat/class_name/school/raw_text。
@@ -50,13 +63,13 @@ def parse_personal_info_block(raw_text: str) -> Tuple[Dict[str, str], float]:
 
     fields: Dict[str, str] = {"raw_text": raw_text}
 
-    # 1. 座号：座号/座位号 后接数字
-    seat = _extract_by_label(flat, _SEAT_LABELS, r"\d+")
+    # 1. 座号：座号/座位号 后接 1-3 位数字（前后不能再是数字，避免吞掉考号 802200211）
+    seat = _extract_by_label(flat, _SEAT_LABELS, r"(?<!\d)\d{1,3}(?!\d)")
     if seat:
         fields["seat"] = seat
 
     # 2. 考场：只取标签后的连续数字，避免把粘连的“小语和：日语”吸进来
-    room = _extract_by_label(flat, _ROOM_LABELS, r"\d+")
+    room = _extract_by_label(flat, _ROOM_LABELS, r"(?<!\d)\d{1,4}(?!\d)")
     if not room:
         room_match = re.search(r"第\s*([一二三四五六七八九十0-9]+)\s*考场", flat)
         if room_match:
@@ -73,12 +86,14 @@ def parse_personal_info_block(raw_text: str) -> Tuple[Dict[str, str], float]:
 
     label_exam_no = _extract_by_label(flat, _EXAM_NO_LABELS, r"[A-Za-z0-9\-]{4,20}")
     label_student_no = _extract_by_label(flat, _STUDENT_NO_LABELS, r"[A-Za-z0-9\-]{4,20}")
+    # 条码解码值（pyzbar）优先级最高，避免手写/印刷数字 OCR 误识（80220G229 等）
+    barcode_exam_no = _extract_by_label(flat, _BARCODE_NO_LABELS, r"[A-Za-z0-9\-]{4,20}")
 
-    exam_no = label_exam_no or ""
+    exam_no = barcode_exam_no or label_exam_no or ""
     student_no = label_student_no or ""
 
-    # 如果最长数字比标签提取的更长，用它补充缺失的字段
-    if longest_num:
+    # 如果最长数字比标签提取的更长，用它补充缺失的字段（条码命中时不再被覆盖）
+    if longest_num and not barcode_exam_no:
         if len(longest_num) > len(exam_no):
             exam_no = longest_num
         if len(longest_num) > len(student_no):
@@ -126,17 +141,37 @@ def parse_personal_info_block(raw_text: str) -> Tuple[Dict[str, str], float]:
         fields["school"] = school
 
     # 6. 姓名：
-    #    优先匹配“姓名：XXX”标签
-    name = _extract_by_label(flat, _NAME_LABELS, r"[^\s：:]+(?:\s+[^\s：:]+)?")
+    #    条码锚定标签条注入的显式标记（印刷体，最可靠）> 打印条码标签行（印刷体）
+    #    > “姓名：XXX”手写标签 > 粘连标签 > 启发式兜底。
+    name = _extract_by_label(flat, _MARKED_NAME_LABELS, r"[\u4e00-\u9fa5·]{2,8}")
+    if not name:
+        name = _extract_name_by_printed_label(flat)
+    if not name:
+        # 优先匹配“姓名：XXX”标签
+        name = _extract_by_label(flat, _NAME_LABELS, r"[^\s：:]+(?:\s+[^\s：:]+)?")
     if not name:
         # OCR 丢失冒号/空格分隔时（“姓名娜木汗”），标签后的负向预查会挡住中文名，
         # 需要单独允许姓名标签后直接粘连中文取值
         name = _extract_name_by_glued_label(flat)
     if not name:
-        # 没有标签时，把已识别的字段从文本中去掉，剩下的中文里取最可能是姓名的 2-4 字词
+        # 没有标签时，把已识别的字段从文本中去掉，剩下的中文里取最可能是姓名的 2-8 字词
         name = _extract_name_heuristic(flat, fields)
     if name:
         fields["name"] = name
+
+    # 7. 花名册裁决：把所有姓名候选（标签条多变体 + 解析链结果）对考生名单做相似度匹配，
+    #    取最优者。OCR 对少数民族低频人名天然不稳（敖其泰→放其泰），但候选里通常有一个
+    #    足够接近真名；名单匹配可把单字符误识全部纠正回来。
+    if candidate_names:
+        pool = []
+        for n in list(extra_name_candidates or []) + [name]:
+            if n and n not in pool:
+                pool.append(n)
+        matched = _best_roster_match(pool, candidate_names)
+        if matched:
+            if matched != name:
+                logger.info("[parser] 花名册裁决姓名: %s -> %s (候选=%s)", name, matched, pool)
+            fields["name"] = matched
 
     # 置信度：解析出的字段越多置信度越高（exam_no/student_no 任一命中即可）
     core_fields = [
@@ -204,6 +239,91 @@ def _extract_name_by_glued_label(text: str) -> str:
     return ""
 
 
+# 印刷标签行姓名锚点：优先“班级:”，其次“考场:”“座位:”（OCR 可能漏识别“班级”字样）
+_PRINTED_LABEL_ANCHORS = ["班级", "考场", "座位"]
+
+# 印刷标签锚点前可能出现的字段词/科目词，不能当作姓名
+_PRINTED_LABEL_STOP_WORDS = {"班级", "考场", "座位", "座号", "姓名", "学校", "年级"}
+
+
+def _best_roster_match(pool: list, roster: list, cutoff: float = 0.6) -> str:
+    """从候选池中选出与花名册最相似的名字。
+
+    逐候选打分（与名单全体成员取最大相似度），返回得分最高的名单名；
+    两字名容易误配，要求更高阈值（0.75）。无候选过阈值时返回空串。
+    """
+    import difflib
+
+    best_name, best_score = "", 0.0
+    for cand in pool:
+        if not cand:
+            continue
+        for ref in roster:
+            if not ref:
+                continue
+            if cand == ref:
+                return ref  # 完全一致直接命中
+            score = difflib.SequenceMatcher(None, cand, ref).ratio()
+            threshold = 0.75 if len(ref) <= 2 else cutoff
+            if score >= threshold and score > best_score:
+                best_name, best_score = ref, score
+    return best_name
+
+
+def upsert_marked_name(raw_text: str, name: str) -> str:
+    """把最终姓名以“印刷体姓名”标记行回写 raw_text（移除旧标记），
+    保证 Java 端对 student_info_block 原文的二次解析与 Python 端结论一致。"""
+    lines = [l for l in (raw_text or "").split("\n")
+             if not re.match(r"^\s*(印刷体姓名|条码姓名)[:：]", l)]
+    lines.append(f"印刷体姓名:{name}")
+    return "\n".join(lines)
+
+
+def extract_printed_label_name(text: str) -> str:
+    """公开包装：从印刷标签行提取姓名（供 OCR 引擎判断是否需要补充识别）。"""
+    return _extract_name_by_printed_label(text)
+
+
+def _extract_name_by_printed_label(text: str) -> str:
+    """从打印条码标签行提取姓名（打印体，识别稳定，优先于手写行 OCR 结果）。
+
+    典型格式：“{学校/前缀} {姓名} 班级:{班级}{考号} 考场:{N}班 座位:{M}”，如：
+      “韩-中 查干其其格 班级:九班802200235 考场:341班 座位:25”
+      “东转一中 嘎尔帝 班级:八班802200237 考场:341班 座位:27”
+    姓名位于锚点标签前的末段（前面的段是学校名/民族-语种前缀，段数不固定）。
+    “班级:”锚点缺失时（OCR 漏识别），依次尝试“考场:”“座位:”锚点。
+    """
+    for anchor in _PRINTED_LABEL_ANCHORS:
+        name = _extract_name_before_anchor(text, anchor)
+        if name:
+            return name
+    return ""
+
+
+def _extract_name_before_anchor(text: str, anchor: str) -> str:
+    """取指定锚点标签前的最后一个中文分段作为候选姓名，并做合法性校验。"""
+    m = re.search(rf"([\u4e00-\u9fa5·\-\s]*[\u4e00-\u9fa5·])\s*{anchor}[:：]", text)
+    if not m:
+        return ""
+    seg = m.group(1).strip()
+    parts = [p for p in re.split(r"\s+", seg) if p]
+    if not parts:
+        return ""
+    name = parts[-1]
+    # 单段内残留“韩-中 ”这类 X-X 前缀时剥掉
+    name = re.sub(r"^[\u4e00-\u9fa5]{1,4}-[\u4e00-\u9fa5]{1,4}\s+", "", name)
+    # 姓名只可能是中文（含间隔号），2-8 字
+    if not re.fullmatch(r"[\u4e00-\u9fa5·]{2,8}", name):
+        return ""
+    # 锚点前的字段词/科目词不能当作姓名
+    if name in _PRINTED_LABEL_STOP_WORDS or name in _SUBJECT_WORDS:
+        return ""
+    # 姓名段 OCR 丢失时末段会落到学校名/班级词（如“东转一中”“九班”），此时拒绝取值
+    if name.endswith(("中学", "学校", "初中", "高中", "附中", "班")) or _looks_like_school_abbr(name):
+        return ""
+    return name
+
+
 def _extract_name_heuristic(text: str, fields: Dict[str, str]) -> str:
     """无标签时，用启发式提取姓名。"""
     # 去掉已识别字段的文本，减少干扰
@@ -218,11 +338,11 @@ def _extract_name_heuristic(text: str, fields: Dict[str, str]) -> str:
     for label in _NAME_LABELS + _STUDENT_NO_LABELS + _ROOM_LABELS + _SEAT_LABELS + _CLASS_LABELS + _SCHOOL_LABELS + _MINOR_LANG_LABELS:
         removed = removed.replace(label, " ")
 
-    # 按空白切分，找出纯中文 2-4 字词
+    # 按空白切分，找出纯中文（含间隔号）2-8 字词（蒙古族姓名常见 5 字以上，如“查干其其格”）
     candidates = []
     for token in re.split(r"[\s：:,，]+", removed):
         token = token.strip()
-        if token and 2 <= len(token) <= 4 and re.fullmatch(r"[\u4e00-\u9fa5]+", token):
+        if token and 2 <= len(token) <= 8 and re.fullmatch(r"[\u4e00-\u9fa5·]+", token):
             candidates.append(token)
 
     if not candidates:

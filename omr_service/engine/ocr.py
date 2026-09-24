@@ -160,8 +160,88 @@ class PersonalInfoOcr:
                     results.append(data)
             return results
         except Exception as e:
-            logger.debug("条码解码异常: %s", e)
+            # zbar 原生库缺失（Windows 常见）或解码失败时给出可见告警，便于现场排查
+            logger.warning("条码解码不可用/异常，将依赖 OCR 数字兜底: %s", e)
             return []
+
+    @staticmethod
+    def _decode_barcodes_robust(image: np.ndarray) -> List[str]:
+        """条码解码增强版：对同一张图依次尝试原图、灰度、Otsu 二值化、2 倍放大，任一成功即止。"""
+        return [text for text, _ in PersonalInfoOcr._locate_barcodes(image)]
+
+    @staticmethod
+    def _locate_barcodes(image: np.ndarray) -> List[tuple]:
+        """定位并解码条码，返回 [(文本, rect)] 列表，rect=(x, y, w, h) 相对传入图像。
+
+        扫描件对比度低/条码偏小时，单一路径解码容易失败，多预处理变体可显著提升召回；
+        位置信息用于“条码锚定印刷标签条 OCR”。
+        """
+        try:
+            from pyzbar.pyzbar import decode
+        except Exception as e:
+            logger.warning("pyzbar/zbar 不可用，条码解码跳过（将依赖 OCR 数字兜底）: %s", e)
+            return []
+
+        variants = [image]
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+            variants.append(gray)
+            _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            variants.append(otsu)
+            # 整页大图兜底时不再放大，避免内存/耗时爆炸；放大变体的坐标需换算回原图
+            if gray.shape[0] * gray.shape[1] < 6_000_000:
+                scaled = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+                variants.append((scaled, 0.5))
+        except Exception as e:
+            logger.warning("条码解码预处理异常，仅使用原图: %s", e)
+
+        for variant in variants:
+            # 最后一个元素可能是 (放大图, 坐标缩放比例)
+            if isinstance(variant, tuple):
+                img_variant, coord_scale = variant
+            else:
+                img_variant, coord_scale = variant, 1.0
+            try:
+                barcodes = decode(img_variant)
+            except Exception as e:
+                logger.warning("条码解码异常: %s", e)
+                continue
+            results = []
+            for barcode in barcodes:
+                data = barcode.data.decode("utf-8") if barcode.data else ""
+                if not data:
+                    continue
+                rect = getattr(barcode, "rect", None)
+                if rect is not None:
+                    box = (
+                        int(rect.left * coord_scale), int(rect.top * coord_scale),
+                        int(rect.width * coord_scale), int(rect.height * coord_scale),
+                    )
+                else:
+                    box = None
+                results.append((data, box))
+            if results:
+                return results
+        return []
+
+    @staticmethod
+    def _crop_label_strip(image: np.ndarray, rect: tuple, offset: tuple) -> Optional[np.ndarray]:
+        """以条码位置为锚点，裁出其上下印刷标签条（上方姓名行 + 下方考号/考场/座位行）。
+
+        印刷标签字体小，整块考生信息区 OCR 时容易丢行；单独裁出放大识别可显著提高召回。
+        """
+        rx, ry, rw, rh = rect
+        ox, oy = offset
+        px, py = ox + rx, oy + ry
+        h, w = image.shape[:2]
+        # 横向各扩 0.4 倍条码宽（标签文字一般略宽于条码），纵向扩到上/下各一行文字
+        x1 = max(0, int(px - 0.4 * rw))
+        x2 = min(w, int(px + rw + 0.4 * rw))
+        y1 = max(0, int(py - 1.1 * rh))
+        y2 = min(h, int(py + rh + 1.0 * rh))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return image[y1:y2, x1:x2]
 
     @staticmethod
     def _is_student_id_field(field: str) -> bool:
@@ -254,16 +334,151 @@ class PersonalInfoOcr:
             return {"raw_text": "", "confidence": 0.0}
 
         preprocessed = self._preprocess(crop)
+        ocr_result = self._ocr_block_lines(engine, preprocessed)
+        if ocr_result is None:
+            return {"raw_text": "", "confidence": 0.0}
+        texts, confidences = ocr_result
+
+        # 条码定位（准考证号常为条形码）：先考生信息区 crop，失败再整页兜底。
+        # 保留条码位置信息（rect 相对被解码图像），用于后续“条码锚定印刷标签条 OCR”。
+        barcode_hits = self._locate_barcodes(crop)
+        strip_offset = self._crop_offset(image, region)
+        if not barcode_hits and image is not None and image.size > 0:
+            barcode_hits = self._locate_barcodes(image)
+            strip_offset = (0, 0)
+            if barcode_hits:
+                logger.info("[ocr] 考生信息区内未解码出条码，整页兜底命中: %s",
+                            [t for t, _ in barcode_hits])
+        for data, _ in barcode_hits:
+            if data not in texts:
+                texts.append(data)
+                confidences.append(1.0)
+            # 显式标记行：解析器/Java 端优先采用条码考号，避免手写考号误识（如 80220G229）
+            marker = f"条码考号:{data}"
+            if marker not in texts:
+                texts.append(marker)
+                confidences.append(1.0)
+
+        # 条码锚定印刷标签条 OCR：印刷体姓名行（条码上方小字）在整块 OCR 中容易丢行/误识，
+        # 只要定位到条码就以其为锚点裁出上下标签条，用 3 种轻预处理变体（放大、不去噪）分别识别，
+        # 各变体结果互补（如“阿夏如”只有 CLAHE 变体正确），全部作为姓名候选供花名册裁决；
+        # 主变体（纯灰度）的文本行并入 raw_text，并以显式标记行注入主候选姓名。
+        name_candidates: List[str] = []
+        if barcode_hits:
+            for _, rect in barcode_hits[:2]:
+                if not rect:
+                    continue
+                strip = self._crop_label_strip(image, rect, strip_offset)
+                if strip is None or strip.size == 0:
+                    continue
+                for vi, variant in enumerate(self._strip_preprocess_variants(strip)):
+                    strip_result = self._ocr_block_lines(engine, variant)
+                    if not strip_result:
+                        continue
+                    strip_lines, strip_confs = strip_result
+                    variant_name = self._extract_name_from_strip_lines(strip_lines)
+                    if variant_name and variant_name not in name_candidates:
+                        name_candidates.append(variant_name)
+                    if vi == 0:
+                        added = [t for t in strip_lines if t and t not in texts]
+                        texts.extend(added)
+                        confidences.extend(strip_confs)
+                        logger.info("[ocr] 条码锚定标签条 OCR 文本行: %s", added)
+                if name_candidates:
+                    break
+            if name_candidates:
+                marker = f"印刷体姓名:{name_candidates[0]}"
+                if marker not in texts:
+                    texts.append(marker)
+                    confidences.append(1.0)
+                logger.info("[ocr] 条码标签条姓名候选: %s", name_candidates)
+
+        # 印刷标签行召回增强：首遍 OCR 若三个印刷锚点（班级/考场/座位）都未出现，
+        # 说明印刷体小字可能漏识别，对 crop 放大 2 倍重跑一次并合并文本，
+        # 以便解析器能命中印刷体姓名/考号（只重试一次，受上层 OCR 超时约束）。
+        joined = "\n".join(texts)
+        if not any(anchor in joined for anchor in ("班级", "考场", "座位")):
+            scaled = cv2.resize(preprocessed, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            retry_result = self._ocr_block_lines(engine, scaled)
+            if retry_result:
+                retry_texts, retry_confidences = retry_result
+                if retry_texts:
+                    for t in retry_texts:
+                        if t not in texts:
+                            texts.append(t)
+                    confidences.extend(retry_confidences)
+                    logger.info("[ocr] 考生信息区首遍未识别出印刷标签锚点，已放大重试并合并文本")
+
+        # 按 PaddleOCR 返回的行顺序拼接，保留换行
+        raw_text = "\n".join(texts).strip()
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        return {"raw_text": raw_text, "confidence": round(avg_conf, 4),
+                "name_candidates": name_candidates}
+
+    @staticmethod
+    def _strip_preprocess_variants(image: np.ndarray) -> List[np.ndarray]:
+        """标签条印刷体小字的 3 种轻预处理变体（均放大 3 倍、不去噪）：
+
+        - 纯灰度（主变体，实测准确率最高）
+        - CLAHE 增强
+        - Otsu 二值化
+
+        注意不做 fastNlMeansDenoising：去噪会模糊小号印刷字细笔画导致丢字
+        （如“乌日汗”丢“日”）；CLAHE 对部分扫描件反而有害，故仅作补充变体。
+        """
+        scaled = cv2.resize(image, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY) if len(scaled.shape) == 3 else scaled
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        return [gray, clahe, otsu]
+
+    # 条码标签条内字段标签（含常见 OCR 误读变体），用于行内截断（如“乌尼尔白力夏班级:四班”）
+    _STRIP_LINE_CUT_LABELS = ("班级", "斑级", "考场", "老场", "座位", "座号", "姓名")
+
+    @staticmethod
+    def _extract_name_from_strip_lines(lines: List[str]) -> str:
+        """从条码标签条 OCR 行中提取印刷体姓名。
+
+        标签条布局固定：学校行 + 姓名行（或“学校 姓名 班级:X班”合并行）+ 考号/考场/座位行。
+        按行序取第一个 2-8 字纯中文（含间隔号）、非学校名、非字段值的词。
+        """
+        for line in lines:
+            cut = line
+            for label in PersonalInfoOcr._STRIP_LINE_CUT_LABELS:
+                idx = cut.find(label)
+                if idx > 0:
+                    cut = cut[:idx]
+            for token in re.split(r"[\s：:]+", cut):
+                token = token.strip()
+                if not re.fullmatch(r"[\u4e00-\u9fa5·]{2,8}", token):
+                    continue
+                # 跳过学校名（东乌一中/东转一中/xx中学等）
+                if token.endswith(("中", "中学", "学校", "初中", "高中", "附中", "班")):
+                    continue
+                return token
+        return ""
+
+    @staticmethod
+    def _crop_offset(image: np.ndarray, region: Dict[str, Any]) -> tuple:
+        """计算区域裁剪的偏移量（与 _crop 的边界 clamp 保持一致）"""
+        h, w = image.shape[:2]
+        x1 = max(0, min(int(region.get("x1", 0)), w - 1))
+        y1 = max(0, min(int(region.get("y1", 0)), h - 1))
+        return x1, y1
+
+    @staticmethod
+    def _ocr_block_lines(engine: Any, image: np.ndarray) -> Optional[tuple]:
+        """对整块考生信息区执行一次 OCR，返回 (文本行列表, 置信度列表)；异常时返回 None。"""
         try:
             # Paddle 推理非线程安全，串行化调用
             with PersonalInfoOcr._ocr_call_lock:
-                result = engine.ocr(preprocessed, cls=True)
+                result = engine.ocr(image, cls=True)
         except Exception as e:
             logger.warning("考生信息区 OCR 异常: %s", e)
-            return {"raw_text": "", "confidence": 0.0}
+            return None
 
         if not result or not result[0]:
-            return {"raw_text": "", "confidence": 0.0}
+            return [], []
 
         texts = []
         confidences = []
@@ -273,24 +488,7 @@ class PersonalInfoOcr:
                 if text:
                     texts.append(text)
                 confidences.append(float(conf) if conf is not None else 0.0)
-
-        # 尝试条码解码（准考证号常为条形码），把解码结果追加到文本末尾供后续规则提取
-        try:
-            from pyzbar.pyzbar import decode
-
-            barcodes = decode(crop)
-            for barcode in barcodes:
-                data = barcode.data.decode("utf-8") if barcode.data else ""
-                if data:
-                    texts.append(data)
-                    confidences.append(1.0)
-        except Exception as e:
-            logger.debug("考生信息区条码解码异常: %s", e)
-
-        # 按 PaddleOCR 返回的行顺序拼接，保留换行
-        raw_text = "\n".join(texts).strip()
-        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
-        return {"raw_text": raw_text, "confidence": round(avg_conf, 4)}
+        return texts, confidences
 
 
 def recognize_personal_info(

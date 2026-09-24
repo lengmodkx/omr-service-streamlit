@@ -106,6 +106,7 @@ String url = "http://omr-service:8080/v1/recognize";
 | `template_id` | int64 | 是 | 已解析的黄金模板 ID |
 | `scan_image_url` | string | 是 | 待识别答题卡图片 URL |
 | `question_no` | int32 | 否 | `0` 表示整张识别；非 0 为单题复验（预留） |
+| `candidate_names` | string[] | 否 | 该考试的考生名单（花名册）。提供后，考生姓名识别结果（条码标签条多预处理变体 OCR + 手写行）会与名单做相似度裁决，纠正少数民族低频人名的单字误识（如“敖其泰”误识为“放其泰”）；两字名要求更高相似度（0.75）防止误配。MQ 批量链路中由 Java 端从座位表自动下发（换行分隔字符串）。 |
 
 响应 `RecognizeResult`：
 

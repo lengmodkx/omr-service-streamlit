@@ -46,6 +46,8 @@ class RecognizeRequest(BaseModel):
     question_no: int | None = None
     personal_info_region: list | dict | None = None  # 接受 list[region] 或单个 dict
     subjective_regions: list[SubjectiveRegion] | None = None
+    # 考生名单（花名册），可选；提供后姓名识别结果按名单相似度裁决纠正
+    candidate_names: list[str] | None = None
 
 
 class SubjectiveCrop(BaseModel):

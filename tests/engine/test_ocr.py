@@ -129,6 +129,139 @@ class TestPersonalInfoOcr(unittest.TestCase):
 
         self.assertEqual(engine.max_inflight, 1, "engine.ocr 存在并发调用，未被串行化")
 
+    def test_recognize_block_retries_with_upscale_when_anchors_missing(self):
+        """首遍 OCR 无印刷锚点（班级/考场/座位）时，应放大 2 倍重试并合并文本。"""
+
+        class AnchorAwareEngine:
+            def __init__(self):
+                self.calls = 0
+
+            def ocr(self, image, cls=True):
+                self.calls += 1
+                # crop 高 50，放大后高 100：大图返回印刷标签行，小图只返回手写行
+                if image.shape[0] > 60:
+                    return [[(None, ("东转一中 敖其泰 班级:四班802200231 考场:341班 座位:21", 0.99))]]
+                return [[(None, ("姓名放其泰", 0.6))]]
+
+        engine = AnchorAwareEngine()
+        self.ocr._ocr_engine = engine
+        region = {"field": "student_info_block", "x1": 0, "y1": 0, "x2": 200, "y2": 50}
+        result = self.ocr.recognize_block(self.image, region)
+        self.assertEqual(engine.calls, 2, "首遍无印刷锚点时应触发一次放大重试")
+        self.assertIn("敖其泰", result["raw_text"])
+        self.assertIn("姓名放其泰", result["raw_text"])
+
+    def test_recognize_block_no_retry_when_anchor_present(self):
+        """首遍 OCR 已含印刷锚点时，不应触发放大重试。"""
+
+        class CountingEngine:
+            def __init__(self):
+                self.calls = 0
+
+            def ocr(self, image, cls=True):
+                self.calls += 1
+                return [[(None, ("敖其泰 班级:四班 考场:341班 座位:21", 0.95))]]
+
+        engine = CountingEngine()
+        self.ocr._ocr_engine = engine
+        region = {"field": "student_info_block", "x1": 0, "y1": 0, "x2": 200, "y2": 50}
+        result = self.ocr.recognize_block(self.image, region)
+        self.assertEqual(engine.calls, 1)
+        self.assertIn("敖其泰", result["raw_text"])
+
+    def test_decode_barcodes_robust_returns_empty_when_pyzbar_missing(self):
+        """pyzbar/zbar 不可用时应告警并返回空列表，不影响 OCR 主流程。"""
+        import sys
+        from unittest.mock import patch
+
+        with patch.dict(sys.modules, {"pyzbar": None, "pyzbar.pyzbar": None}):
+            self.assertEqual(self.ocr._decode_barcodes_robust(self.image), [])
+
+    def test_decode_barcodes_robust_tries_preprocess_variants(self):
+        """原图解码失败时应继续尝试预处理变体，任一成功即返回。"""
+        import sys
+        import types
+        from unittest.mock import patch
+
+        calls = []
+
+        class FakeBarcode:
+            def __init__(self, data):
+                self.data = data
+                self.rect = None
+
+        def fake_decode(img):
+            calls.append(img)
+            if len(calls) < 2:
+                return []
+            return [FakeBarcode(b"802200231")]
+
+        fake_pyzbar = types.ModuleType("pyzbar")
+        fake_pyzbar_py = types.ModuleType("pyzbar.pyzbar")
+        fake_pyzbar_py.decode = fake_decode
+        with patch.dict(sys.modules, {"pyzbar": fake_pyzbar, "pyzbar.pyzbar": fake_pyzbar_py}):
+            results = self.ocr._decode_barcodes_robust(self.image)
+        self.assertEqual(results, ["802200231"])
+        self.assertGreaterEqual(len(calls), 2, "首个变体失败后应继续尝试后续预处理变体")
+
+    def test_recognize_block_barcode_anchored_label_strip_ocr(self):
+        """整块 OCR 丢失印刷姓名行时，应以条码位置为锚点裁出标签条放大重识，召回印刷体姓名。"""
+        import sys
+        import types
+        from collections import namedtuple
+        from unittest.mock import patch
+
+        Rect = namedtuple("Rect", ["left", "top", "width", "height"])
+
+        class FakeBarcode:
+            def __init__(self):
+                self.data = b"802200236"
+                # 条码位于整图 (100,100) 处，80x20
+                self.rect = Rect(100, 100, 80, 20)
+
+        def fake_decode(img):
+            return [FakeBarcode()]
+
+        class StripAwareEngine:
+            """整块只返回手写误识行；标签条（62x144 放大 3 倍后为 186x432）返回印刷标签行。"""
+
+            def __init__(self):
+                self.shapes = []
+
+            def ocr(self, image, cls=True):
+                self.shapes.append(image.shape)
+                if image.shape == (186, 432):
+                    return [[
+                        (None, ("鸽一中 乌达木 班级:四班", 0.98)),
+                        (None, ("802200236 考场:341班 座位:26", 0.98)),
+                    ]]
+                return [[(None, ("姓名乌达术", 0.6))]]
+
+        engine = StripAwareEngine()
+        self.ocr._ocr_engine = engine
+        image = np.full((200, 400, 3), 255, dtype=np.uint8)
+        region = {"field": "student_info_block", "x1": 0, "y1": 0, "x2": 400, "y2": 200}
+
+        fake_pyzbar = types.ModuleType("pyzbar")
+        fake_pyzbar_py = types.ModuleType("pyzbar.pyzbar")
+        fake_pyzbar_py.decode = fake_decode
+        with patch.dict(sys.modules, {"pyzbar": fake_pyzbar, "pyzbar.pyzbar": fake_pyzbar_py}):
+            result = self.ocr.recognize_block(image, region)
+
+        # 条码解码值与显式标记、印刷标签行都应进入 raw_text
+        self.assertIn("条码考号:802200236", result["raw_text"])
+        self.assertIn("乌达木", result["raw_text"])
+        self.assertIn("印刷体姓名:乌达木", result["raw_text"])
+        # 姓名候选应包含标签条变体提取结果
+        self.assertIn("乌达木", result["name_candidates"])
+        # 整块 + 标签条 3 个预处理变体共 4 次 OCR，不应再触发整块放大重试
+        self.assertEqual(len(engine.shapes), 4)
+        # 端到端：解析器应得到印刷体姓名“乌达木”而非手写误识“乌达术”
+        from omr_service.engine.personal_info_block_parser import parse_personal_info_block
+        fields, _ = parse_personal_info_block(result["raw_text"])
+        self.assertEqual("乌达木", fields.get("name"))
+        self.assertEqual("802200236", fields.get("exam_no"))
+
 
 if __name__ == "__main__":
     unittest.main()

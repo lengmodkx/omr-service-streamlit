@@ -13,7 +13,7 @@ from omr_service.core.exceptions import ImageLoadError
 from omr_service.core.service import OmrService, run_with_timeout
 from omr_service.engine.cropper import SubjectiveCropper
 from omr_service.engine.ocr import PersonalInfoOcr
-from omr_service.engine.personal_info_block_parser import parse_personal_info_block
+from omr_service.engine.personal_info_block_parser import parse_personal_info_block, upsert_marked_name
 from omr_service.loader.image_loader import ImageLoader
 from omr_service.loader.template_store import CachedTemplate, TemplateStore
 from omr_service.mq.producer import MqProducer
@@ -120,6 +120,7 @@ class BatchJobHandler:
         template_id: int,
         image_url: str,
         task_id: Optional[str] = None,
+        candidate_names: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """识别单张（可能多页）答题卡，返回可序列化的 dict"""
         cached = self._get_or_load_template(template_id)
@@ -152,7 +153,9 @@ class BatchJobHandler:
             personal_info: List[Dict[str, Any]] = []
             if cached.personal_info:
                 personal_info = run_with_timeout(
-                    lambda: self._recognize_personal_info(images, cached.personal_info),
+                    lambda: self._recognize_personal_info(
+                        images, cached.personal_info, candidate_names
+                    ),
                     self.cfg.ocr_timeout_seconds,
                     "个人信息OCR",
                     [],
@@ -200,8 +203,12 @@ class BatchJobHandler:
         self,
         images: List[np.ndarray],
         regions: List[Dict[str, Any]],
+        candidate_names: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """按 page_index 分组图片，批量识别普通个人信息，并单独解析考生信息区整体框。"""
+        """按 page_index 分组图片，批量识别普通个人信息，并单独解析考生信息区整体框。
+
+        candidate_names: 该考试的考生名单（花名册），随任务 payload 下发，用于姓名候选相似度裁决。
+        """
         page_groups: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
         for idx, region in enumerate(regions):
             page_index = int(region.get("page_index", 0))
@@ -247,10 +254,18 @@ class BatchJobHandler:
                 raw_result = self._ocr.recognize_block(image, region)
                 raw_text = raw_result.get("raw_text", "")
                 try:
-                    fields, conf = parse_personal_info_block(raw_text)
+                    fields, conf = parse_personal_info_block(
+                        raw_text,
+                        extra_name_candidates=raw_result.get("name_candidates"),
+                        candidate_names=candidate_names,
+                    )
                 except Exception as e:
                     logger.warning("考生信息解析异常，保留原始文本: %s | raw_text=%s", e, raw_text)
                     fields, conf = {"raw_text": raw_text}, 0.0
+                # 花名册裁决后的最终姓名回写标记行，保证 Java 端二次解析结论一致
+                if fields.get("name"):
+                    raw_text = upsert_marked_name(raw_text, fields["name"])
+                    fields["raw_text"] = raw_text
                 results[idx] = {
                     "field": STUDENT_INFO_BLOCK_FIELD,
                     "value": raw_text,
@@ -288,9 +303,15 @@ class BatchJobHandler:
         image_url = task.get("image_url", "")
         retry_count = int(task.get("retry_count", 0))
         max_retry = int(task.get("max_retry", self.cfg.omr_max_retry))
+        # 考生名单（花名册）：Java 端随任务下发（换行分隔），用于姓名候选相似度裁决
+        candidate_names = [
+            n.strip() for n in str(task.get("candidate_names") or "").split("\n") if n.strip()
+        ] or None
 
         try:
-            data = self._recognize_one(template_id, image_url, task_id=task_id)
+            data = self._recognize_one(
+                template_id, image_url, task_id=task_id, candidate_names=candidate_names
+            )
             code = data.get("code", -1)
             if code == 0:
                 payload = self._build_success_payload(task, data)

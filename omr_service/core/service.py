@@ -240,8 +240,10 @@ class OmrService:
             regions = normalize_personal_info(request["personal_info_region"])
             if isinstance(request["personal_info_region"], dict):
                 regions = normalize_personal_info([request["personal_info_region"]])
+            # 考生名单（花名册），用于姓名候选相似度裁决，可选
+            candidate_names = request.get("candidate_names") or None
             result["personal_info"] = run_with_timeout(
-                lambda: self._recognize_personal_info(images, regions),
+                lambda: self._recognize_personal_info(images, regions, candidate_names),
                 self.ocr_timeout_seconds,
                 "个人信息OCR",
                 [],
@@ -286,14 +288,18 @@ class OmrService:
                 c["page_index"] = original_page_by_q.get(q, _as_int(c.get("page_index")))
         return crops
 
-    def _recognize_personal_info(self, images, regions):
+    def _recognize_personal_info(self, images, regions, candidate_names=None):
         """按 page_index 分组图片，批量识别个人信息，并单独解析整块考生信息区。
 
         与 job_handler.py 行为一致：普通字段单字段 OCR，整块区域用 recognize_block + parse_personal_info_block。
         单图场景（Java 按页拆请求）page_index 归一化为 0 选图（对齐旧 gRPC 分支）。
         考生信息区解析出的子字段平铺追加到结果列表（Java 端按 field 平铺读取）。
+        candidate_names: 该考试的考生名单（花名册），用于姓名候选相似度裁决。
         """
-        from omr_service.engine.personal_info_block_parser import parse_personal_info_block
+        from omr_service.engine.personal_info_block_parser import (
+            parse_personal_info_block,
+            upsert_marked_name,
+        )
 
         single_image = len(images) == 1
         page_groups: Dict[int, list] = {}
@@ -336,10 +342,18 @@ class OmrService:
                 raw_result = self.ocr_engine.recognize_block(image, region)
                 raw_text = raw_result.get("raw_text", "")
                 try:
-                    fields, conf = parse_personal_info_block(raw_text)
+                    fields, conf = parse_personal_info_block(
+                        raw_text,
+                        extra_name_candidates=raw_result.get("name_candidates"),
+                        candidate_names=candidate_names,
+                    )
                 except Exception as e:
                     logger.warning("考生信息解析异常: %s | raw_text=%s", e, raw_text)
                     fields, conf = {"raw_text": raw_text}, 0.0
+                # 花名册裁决后的最终姓名回写标记行，保证 Java 端二次解析结论一致
+                if fields.get("name"):
+                    raw_text = upsert_marked_name(raw_text, fields["name"])
+                    fields["raw_text"] = raw_text
                 block_entry: Dict[str, Any] = {
                     "field": self.student_info_block_field,
                     "value": raw_text,
