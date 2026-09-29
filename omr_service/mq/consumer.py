@@ -275,6 +275,11 @@ def start_consumer_thread(
     cfg.omr_batch_size = getattr(settings, "consumer_batch_size", 4)
     cfg.omr_single_task_timeout_sec = getattr(settings, "consumer_task_timeout_sec", 120)
     cfg.ocr_timeout_seconds = getattr(settings, "ocr_timeout_seconds", 30.0)
+    # 讯飞 OCR 增强通道配置透传
+    for attr in ("xfyun_enabled", "xfyun_app_id", "xfyun_doc_api_key", "xfyun_doc_api_secret",
+                 "xfyun_hw_api_key", "xfyun_doc_url", "xfyun_hw_url",
+                 "xfyun_timeout_seconds", "xfyun_verify_ssl"):
+        setattr(cfg, attr, getattr(settings, attr, getattr(cfg, attr)))
 
     consumer = MqConsumer(
         cfg=cfg,

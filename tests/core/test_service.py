@@ -350,6 +350,50 @@ def test_recognize_personal_info_block_fields_flattened(service, mock_deps):
     assert fields["room"] == "1"
 
 
+def test_recognize_personal_info_handwriting_fallback(service, mock_deps):
+    """姓名字段 Paddle 识别为空时，讯飞手写识别兜底（含“姓名：”前缀清洗）。"""
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    # Paddle 低置信度 → value 置空
+    mock_deps["ocr_engine"].recognize.return_value = [
+        {"field": "name", "value": "放其泰", "confidence": 0.1}
+    ]
+
+    class FakeHw:
+        def recognize_text(self, crop):
+            return "姓名：敖其泰"
+
+    service.xfyun_hw = FakeHw()
+    try:
+        results = service._recognize_personal_info(
+            [img], [{"field": "name", "x1": 0, "y1": 0, "x2": 5, "y2": 5, "page_index": 0}]
+        )
+    finally:
+        service.xfyun_hw = None
+    assert results[0]["value"] == "敖其泰"
+    assert results[0]["confidence"] == 0.99
+
+
+def test_recognize_personal_info_barcode_label_flattened(service, mock_deps):
+    """条码标签区结果应平铺追加 printed_name / exam_no（Java 端 printed_name 优先于手写 name）"""
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    mock_deps["ocr_engine"].recognize_label_strip.return_value = {
+        "raw_text": "东乌一中\n敖其泰\n条码考号:802200231\n印刷体姓名:敖其泰",
+        "name": "敖其泰",
+        "exam_no": "802200231",
+        "confidence": 0.99,
+        "name_candidates": ["敖其泰"],
+    }
+
+    results = service._recognize_personal_info(
+        [img], [{"field": "barcode_label", "x1": 0, "y1": 0, "x2": 5, "y2": 5, "page_index": 0}]
+    )
+
+    fields = {r["field"]: r["value"] for r in results}
+    assert fields["barcode_label"].startswith("东乌一中")
+    assert fields["printed_name"] == "敖其泰"
+    assert fields["exam_no"] == "802200231"
+
+
 def test_recognize_personal_info_low_confidence_cleared(service, mock_deps):
     """低于 ocr_confidence_threshold 的结果 value 置空"""
     img = np.zeros((100, 100, 3), dtype=np.uint8)

@@ -106,7 +106,33 @@ String url = "http://omr-service:8080/v1/recognize";
 | `template_id` | int64 | 是 | 已解析的黄金模板 ID |
 | `scan_image_url` | string | 是 | 待识别答题卡图片 URL |
 | `question_no` | int32 | 否 | `0` 表示整张识别；非 0 为单题复验（预留） |
+| `personal_info_region` | list\|dict | 否 | 个人信息区域配置。`field=student_info_block` 为考生信息区整块识别；`field=barcode_label` 为「条码标签区」（框题管理中单独框选的印刷条码标签条），对小区域做 3 种轻预处理变体（放大、不去噪）高精度识别，产出 `printed_name`（印刷体姓名）与 `exam_no`（条码考号），优先级高于手写字段 |
 | `candidate_names` | string[] | 否 | 该考试的考生名单（花名册）。提供后，考生姓名识别结果（条码标签条多预处理变体 OCR + 手写行）会与名单做相似度裁决，纠正少数民族低频人名的单字误识（如“敖其泰”误识为“放其泰”）；两字名要求更高相似度（0.75）防止误配。MQ 批量链路中由 Java 端从座位表自动下发（换行分隔字符串）。 |
+
+## 3.2.1 讯飞 OCR 增强通道（可选，默认关闭）
+
+当 PaddleOCR 对姓名类字段/条码标签条识别无结果时，可按次计费调用讯飞云端引擎兜底：
+
+| 通道 | 讯飞服务 | 触发时机 |
+|------|----------|----------|
+| 印刷体兜底 | 通用文档识别（OCR 大模型） | `barcode_label` 标签条 Paddle 多变体无姓名候选时 |
+| 手写体兜底 | 手写文字识别 | `name`/`姓名` 字段 Paddle 识别为空（或低于置信度阈值）时 |
+
+配置（Nacos `omr-service.yaml` 的 `xfyun.*` 或环境变量 `OMR_XFYUN_*`）：
+
+| 配置项 | 环境变量 | 说明 |
+|--------|----------|------|
+| `xfyun_enabled` | `OMR_XFYUN_ENABLED` | 总开关，默认 false |
+| `xfyun_app_id` | `OMR_XFYUN_APP_ID` | 讯飞应用 APPID |
+| `xfyun_doc_api_key` / `xfyun_doc_api_secret` | `OMR_XFYUN_DOC_API_KEY` / `OMR_XFYUN_DOC_API_SECRET` | OCR 大模型凭证 |
+| `xfyun_hw_api_key` | `OMR_XFYUN_HW_API_KEY` | 手写识别凭证 |
+| `xfyun_timeout_seconds` | `OMR_XFYUN_TIMEOUT_SECONDS` | 单次调用超时，默认 10s |
+| `xfyun_verify_ssl` | `OMR_XFYUN_VERIFY_SSL` | 默认 true；部署环境存在 MITM 代理导致 TLS 握手失败时设 false |
+
+双引擎各自的识别值（`name_paddle` / `name_xfyun_doc` / `name_xfyun_hw`）会平铺进 `personal_info`，
+前端识别结果页并列展示，供人工核对；不一致时最终姓名优先取讯飞文档大模型（实测单通道最强），
+其次 Paddle 标签条，手写通道讯飞优先。有花名册（`candidate_names`）时所有候选统一做相似度裁决。
+调用失败仅记 warning 日志，不影响主链路。
 
 响应 `RecognizeResult`：
 

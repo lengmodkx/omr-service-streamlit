@@ -16,6 +16,19 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# 「条码标签区」字段标识（框题管理中单独框选印刷标签条，与前端/Java 约定一致）
+BARCODE_LABEL_FIELD = "barcode_label"
+
+# 手写姓名字段标识（讯飞手写识别兜底通道作用于这些字段）
+NAME_FIELD_IDS = {"name", "姓名", "考生姓名"}
+
+
+def clean_handwritten_name(text: str) -> str:
+    """清洗手写识别结果中的“姓名”标签与符号，提取 2-8 字中文名（含间隔号）。"""
+    t = re.sub(r"考生姓名|姓名|名字", " ", text or "")
+    m = re.search(r"[\u4e00-\u9fa5·]{2,8}", t)
+    return m.group(0) if m else ""
+
 # 常见准考证号/考生号类字段标识，识别后需要兜底提取纯数字
 _STUDENT_ID_FIELDS = {
     "student_no",
@@ -415,6 +428,108 @@ class PersonalInfoOcr:
         return {"raw_text": raw_text, "confidence": round(avg_conf, 4),
                 "name_candidates": name_candidates}
 
+    def recognize_label_strip(
+        self,
+        image: np.ndarray,
+        region: Dict[str, Any],
+        candidate_names: Optional[List[str]] = None,
+        doc_fallback: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """识别「条码标签区」（框题管理中单独框选的印刷标签条小区域）。
+
+        小区域 + 轻预处理（3 倍放大、不去噪）多变体 OCR，印刷体姓名/条码考号精度
+        远高于整块考生信息区识别。有花名册时对姓名候选做相似度裁决。
+
+        Args:
+            doc_fallback: 讯飞 OCR 大模型兜底（按次计费），签名 crop -> List[str] 文本行，
+                          仅当 Paddle 多变体没有产出任何姓名候选时调用。
+
+        Returns:
+            {"raw_text": str, "name": str, "exam_no": str,
+             "name_candidates": list, "confidence": float}
+        """
+        empty = {"raw_text": "", "name": "", "exam_no": "",
+                 "name_candidates": [], "confidence": 0.0}
+        crop = self._crop(image, region)
+        if crop.size == 0:
+            return empty
+
+        # 条码解码（标签区内必有条码，小图解码快且准）；
+        # 框选把条码裁残/留白不足时解码会失败，此时对整页兜底再找一次
+        barcode_hits = self._locate_barcodes(crop)
+        if not barcode_hits and image is not None and image.size > 0:
+            barcode_hits = self._locate_barcodes(image)
+            if barcode_hits:
+                logger.info("[ocr] 标签区内未解码出条码，整页兜底命中: %s",
+                            [t for t, _ in barcode_hits])
+        exam_no = barcode_hits[0][0] if barcode_hits else ""
+
+        # 3 种轻预处理变体分别 OCR，姓名候选互补（实测：阿夏如只有 CLAHE 变体正确等）
+        all_lines: List[str] = []
+        confidences: List[float] = []
+        name_candidates: List[str] = []
+        engine = self._get_engine()
+        if engine is not None:
+            for variant in self._strip_preprocess_variants(crop):
+                result = self._ocr_block_lines(engine, variant)
+                if not result:
+                    continue
+                lines, confs = result
+                confidences.extend(confs)
+                for t in lines:
+                    if t and t not in all_lines:
+                        all_lines.append(t)
+                name = self._extract_name_from_strip_lines(lines)
+                if name and name not in name_candidates:
+                    name_candidates.append(name)
+
+        # 讯飞 OCR 大模型印证（按次计费）：与 Paddle 双引擎相互印证，结果均入候选池
+        # paddle_name 记录纯 Paddle 多变体的主候选（讯飞候选加入前），供前端印证展示
+        paddle_name = name_candidates[0] if name_candidates else ""
+        doc_name = ""
+        if doc_fallback is not None:
+            try:
+                doc_lines = doc_fallback(crop)
+            except Exception as e:
+                logger.warning("讯飞OCR大模型识别失败: %s", e)
+                doc_lines = []
+            if doc_lines:
+                for t in doc_lines:
+                    if t and t not in all_lines:
+                        all_lines.append(t)
+                doc_name = self._extract_name_from_strip_lines(doc_lines)
+                if doc_name:
+                    if doc_name not in name_candidates:
+                        name_candidates.append(doc_name)
+                    logger.info("[ocr] 讯飞OCR大模型姓名候选: %s", doc_name)
+
+        # 条码考号标记行（与 recognize_block 的标记约定一致）
+        if exam_no:
+            all_lines.append(f"条码考号:{exam_no}")
+            confidences.append(1.0)
+
+        # 花名册裁决：候选对名单打分取最优，纠正低频人名单字误识
+        # 最终姓名：讯飞文档大模型优先（实测 30 卡 22/30 为最强单通道），Paddle 主候选兜底
+        name = doc_name or paddle_name
+        if candidate_names:
+            from omr_service.engine.personal_info_block_parser import best_roster_match
+            matched = best_roster_match(name_candidates, candidate_names)
+            if matched:
+                if matched != name:
+                    logger.info("[ocr] 条码标签区花名册裁决姓名: %s -> %s (候选=%s)",
+                                name, matched, name_candidates)
+                name = matched
+        if name:
+            all_lines.append(f"印刷体姓名:{name}")
+            confidences.append(1.0)
+
+        raw_text = "\n".join(all_lines).strip()
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        return {"raw_text": raw_text, "name": name, "exam_no": exam_no,
+                "name_candidates": name_candidates, "confidence": round(avg_conf, 4),
+                # 双引擎印证值（前端并列展示，供人工核对）
+                "paddle_name": paddle_name, "xfyun_doc_name": doc_name}
+
     @staticmethod
     def _strip_preprocess_variants(image: np.ndarray) -> List[np.ndarray]:
         """标签条印刷体小字的 3 种轻预处理变体（均放大 3 倍、不去噪）：
@@ -435,6 +550,9 @@ class PersonalInfoOcr:
     # 条码标签条内字段标签（含常见 OCR 误读变体），用于行内截断（如“乌尼尔白力夏班级:四班”）
     _STRIP_LINE_CUT_LABELS = ("班级", "斑级", "考场", "老场", "座位", "座号", "姓名")
 
+    # 标签条文本中可能出现的字段词，不能当作姓名
+    _STRIP_STOP_WORDS = {"姓名", "名字", "考生", "班级", "斑级", "考场", "老场", "座位", "座号", "准考证"}
+
     @staticmethod
     def _extract_name_from_strip_lines(lines: List[str]) -> str:
         """从条码标签条 OCR 行中提取印刷体姓名。
@@ -451,6 +569,8 @@ class PersonalInfoOcr:
             for token in re.split(r"[\s：:]+", cut):
                 token = token.strip()
                 if not re.fullmatch(r"[\u4e00-\u9fa5·]{2,8}", token):
+                    continue
+                if token in PersonalInfoOcr._STRIP_STOP_WORDS:
                     continue
                 # 跳过学校名（东乌一中/东转一中/xx中学等）
                 if token.endswith(("中", "中学", "学校", "初中", "高中", "附中", "班")):

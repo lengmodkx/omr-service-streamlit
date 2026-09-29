@@ -246,14 +246,27 @@ _PRINTED_LABEL_ANCHORS = ["班级", "考场", "座位"]
 _PRINTED_LABEL_STOP_WORDS = {"班级", "考场", "座位", "座号", "姓名", "学校", "年级"}
 
 
-def _best_roster_match(pool: list, roster: list, cutoff: float = 0.6) -> str:
-    """从候选池中选出与花名册最相似的名字。
-
-    逐候选打分（与名单全体成员取最大相似度），返回得分最高的名单名；
-    两字名容易误配，要求更高阈值（0.75）。无候选过阈值时返回空串。
-    """
+def _name_similarity(a: str, b: str) -> float:
+    """姓名相似度：同长度且仅差 1 字（OCR 单字误识的典型形态，如 放其泰/敖其泰）
+    视为完全可信；否则用编辑比率。"""
     import difflib
 
+    if len(a) == len(b) and len(a) >= 3:
+        diff = sum(1 for x, y in zip(a, b) if x != y)
+        if diff <= 1:
+            return 1.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def _best_roster_match(pool: list, roster: list, cutoff: float = 0.75) -> str:
+    """从候选池中选出与花名册最相似的名字。
+
+    逐候选打分（与名单全体成员取最大相似度），返回得分最高的名单名。
+    阈值设计（防止名单中没有真名时误配到别人，如 查干其其格→苏都其其格）：
+    - 两字名要求 ratio ≥ 0.75；
+    - 三字及以上默认 ratio ≥ 0.75，但同长度仅差 1 字直接视为命中（OCR 单字误识）。
+    无候选过阈值时返回空串（保留原 OCR 结果）。
+    """
     best_name, best_score = "", 0.0
     for cand in pool:
         if not cand:
@@ -263,11 +276,15 @@ def _best_roster_match(pool: list, roster: list, cutoff: float = 0.6) -> str:
                 continue
             if cand == ref:
                 return ref  # 完全一致直接命中
-            score = difflib.SequenceMatcher(None, cand, ref).ratio()
-            threshold = 0.75 if len(ref) <= 2 else cutoff
-            if score >= threshold and score > best_score:
+            score = _name_similarity(cand, ref)
+            if score >= cutoff and score > best_score:
                 best_name, best_score = ref, score
     return best_name
+
+
+def best_roster_match(pool: list, roster: list, cutoff: float = 0.6) -> str:
+    """公开包装：从候选池中选出与花名册最相似的名字（供 OCR 引擎/服务层复用）。"""
+    return _best_roster_match(pool, roster, cutoff)
 
 
 def upsert_marked_name(raw_text: str, name: str) -> str:

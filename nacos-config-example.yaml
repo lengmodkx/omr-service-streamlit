@@ -12,3 +12,14 @@ omr-service:
       result_hash_prefix: omr:batch:result:hash
     worker_pool_size: 4
     consumer_enabled: true
+    # 讯飞 OCR 增强通道（可选，按次计费）：Paddle 无结果时的兜底引擎
+    # 凭证从讯飞开放平台控制台获取；enabled=false 时以下配置全部忽略
+    xfyun_enabled: false
+    xfyun_app_id: ""
+    xfyun_doc_api_key: ""       # 通用文档识别（OCR大模型）APIKey
+    xfyun_doc_api_secret: ""    # 通用文档识别（OCR大模型）APISecret
+    xfyun_hw_api_key: ""        # 手写文字识别 APIKey
+    xfyun_doc_url: ""           # 默认 https://cbm01.cn-huabei-1.xf-yun.com/v1/private/se75ocrbm
+    xfyun_hw_url: ""            # 默认 https://webapi.xfyun.cn/v1/service/v1/ocr/handwriting
+    xfyun_timeout_seconds: 10
+    xfyun_verify_ssl: true      # 部署环境有 MITM 代理导致 TLS 握手失败时才设 false

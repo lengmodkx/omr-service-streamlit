@@ -190,6 +190,27 @@ class TestPersonalInfoBlockParser(unittest.TestCase):
         )
         self.assertEqual("余日", fields.get("name"))
 
+    def test_roster_match_not_misassign_when_true_name_absent(self):
+        """名单中没有真名时，不能把正确识别结果错配给名单里相近的别人
+        （生产实况：查干其其格 被旧阈值误配为 苏都其其格）。"""
+        raw = "东乌一中\n查干其其格 班级:九班\n802200235\n印刷体姓名:查干其其格"
+        fields, _ = parse_personal_info_block(
+            raw,
+            extra_name_candidates=["查干其其格"],
+            candidate_names=["苏都其其格", "乌达木"],  # 名单里没有查干其其格
+        )
+        self.assertEqual("查干其其格", fields.get("name"))
+
+    def test_roster_match_single_char_typo_same_length(self):
+        """同长度仅差 1 字（OCR 单字误识）应纠正：赛汗爆 → 赛汗娜。"""
+        raw = "东乌一中\n赛汗爆 班级:九班\n802200227\n印刷体姓名:赛汗爆"
+        fields, _ = parse_personal_info_block(
+            raw,
+            extra_name_candidates=["赛汗爆"],
+            candidate_names=["赛汗娜"],
+        )
+        self.assertEqual("赛汗娜", fields.get("name"))
+
     def test_barcode_marker_exam_no_priority(self):
         """条码考号标记优先于手写考号误识（80220G229），且不被更长数字串覆盖。"""
         raw = "考生号:80220G229\n班级:十班\n8022002291\n印刷体姓名:奈日\n条码考号:802200229"

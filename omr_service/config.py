@@ -68,6 +68,17 @@ class OmrConfig:
     # 个人信息 OCR 置信度阈值（低于此值返回空值，避免脏数据）
     ocr_confidence_threshold: float = 0.3
 
+    # 讯飞 OCR 增强通道（默认关闭；按次计费，仅作 Paddle 无结果时的兜底）
+    xfyun_enabled: bool = False
+    xfyun_app_id: str = ""
+    xfyun_doc_api_key: str = ""
+    xfyun_doc_api_secret: str = ""
+    xfyun_hw_api_key: str = ""
+    xfyun_doc_url: str = ""
+    xfyun_hw_url: str = ""
+    xfyun_timeout_seconds: float = 10.0
+    xfyun_verify_ssl: bool = True
+
     # 工作线程
     worker_count: int = field(default_factory=lambda: os.cpu_count() or 4)
 
@@ -158,6 +169,17 @@ class OmrConfig:
             omr_retry_delay_sec=_get("omr_retry_delay_sec", "OMR_RETRY_DELAY_SEC", 1, int),
             omr_single_task_timeout_sec=_get("omr_single_task_timeout_sec", "OMR_SINGLE_TASK_TIMEOUT_SEC", 60, int),
             ocr_timeout_seconds=_get("ocr_timeout_seconds", "OMR_OCR_TIMEOUT_SECONDS", 30.0, float),
+            xfyun_enabled=_get("xfyun.enabled", "OMR_XFYUN_ENABLED", False,
+                               lambda x: str(x).lower() in ("true", "1", "yes")),
+            xfyun_app_id=_get("xfyun.app_id", "OMR_XFYUN_APP_ID", ""),
+            xfyun_doc_api_key=_get("xfyun.doc_api_key", "OMR_XFYUN_DOC_API_KEY", ""),
+            xfyun_doc_api_secret=_get("xfyun.doc_api_secret", "OMR_XFYUN_DOC_API_SECRET", ""),
+            xfyun_hw_api_key=_get("xfyun.hw_api_key", "OMR_XFYUN_HW_API_KEY", ""),
+            xfyun_doc_url=_get("xfyun.doc_url", "OMR_XFYUN_DOC_URL", ""),
+            xfyun_hw_url=_get("xfyun.hw_url", "OMR_XFYUN_HW_URL", ""),
+            xfyun_timeout_seconds=_get("xfyun.timeout_seconds", "OMR_XFYUN_TIMEOUT_SECONDS", 10.0, float),
+            xfyun_verify_ssl=_get("xfyun.verify_ssl", "OMR_XFYUN_VERIFY_SSL", True,
+                                  lambda x: str(x).lower() in ("true", "1", "yes")),
             # service_version 默认改成空字符串：与 Java 端 @DubboReference 默认 version="" 对齐。
             # Dubbo 3 接口级服务发现对非空 version 严格匹配（metadata + Nacos 服务名两层都得对），
             # 默认 "1.0.0" 会让 consumer 找不到 provider（consumer 默认 version=""）。
@@ -236,6 +258,17 @@ class OmrSettings(BaseSettings):
     ocr_timeout_seconds: float = 30.0
     # 个人信息 OCR 置信度阈值：低于阈值视为未识别，置空 value（对齐旧 gRPC 分支）
     ocr_confidence_threshold: float = 0.3
+
+    # 讯飞 OCR 增强通道（默认关闭；按次计费，仅作 Paddle 无结果时的兜底）
+    xfyun_enabled: bool = False
+    xfyun_app_id: str = ""
+    xfyun_doc_api_key: str = ""
+    xfyun_doc_api_secret: str = ""
+    xfyun_hw_api_key: str = ""
+    xfyun_doc_url: str = ""
+    xfyun_hw_url: str = ""
+    xfyun_timeout_seconds: float = 10.0
+    xfyun_verify_ssl: bool = True
 
     # OMR 内部
     template_ttl_seconds: int = 3600

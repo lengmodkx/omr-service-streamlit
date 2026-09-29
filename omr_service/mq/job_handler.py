@@ -12,8 +12,17 @@ from omr_service.config import OmrConfig
 from omr_service.core.exceptions import ImageLoadError
 from omr_service.core.service import OmrService, run_with_timeout
 from omr_service.engine.cropper import SubjectiveCropper
-from omr_service.engine.ocr import PersonalInfoOcr
-from omr_service.engine.personal_info_block_parser import parse_personal_info_block, upsert_marked_name
+from omr_service.engine.ocr import (
+    BARCODE_LABEL_FIELD,
+    NAME_FIELD_IDS,
+    PersonalInfoOcr,
+    clean_handwritten_name,
+)
+from omr_service.engine.personal_info_block_parser import (
+    best_roster_match,
+    parse_personal_info_block,
+    upsert_marked_name,
+)
 from omr_service.loader.image_loader import ImageLoader
 from omr_service.loader.template_store import CachedTemplate, TemplateStore
 from omr_service.mq.producer import MqProducer
@@ -102,6 +111,9 @@ class BatchJobHandler:
         self.worker_pool = worker_pool
         self.producer = producer
         self.service = service
+        # 讯飞 OCR 增强通道（xfyun_enabled=false 时为 None）
+        from omr_service.engine.xfyun_ocr import build_xfyun_clients
+        self._xfyun_doc, self._xfyun_hw = build_xfyun_clients(cfg)
         self._ocr = PersonalInfoOcr()
         self._cropper = SubjectiveCropper(
             output_dir=cfg.crop_output_dir,
@@ -234,10 +246,16 @@ class BatchJobHandler:
             normal_indices = []
             block_regions = []
             block_indices = []
+            label_regions = []
+            label_indices = []
             for idx, region in indexed_regions:
-                if region.get("field") == STUDENT_INFO_BLOCK_FIELD:
+                field = region.get("field")
+                if field == STUDENT_INFO_BLOCK_FIELD:
                     block_regions.append(region)
                     block_indices.append(idx)
+                elif field == BARCODE_LABEL_FIELD:
+                    label_regions.append(region)
+                    label_indices.append(idx)
                 else:
                     normal_regions.append(region)
                     normal_indices.append(idx)
@@ -249,6 +267,59 @@ class BatchJobHandler:
                     if result.get("confidence", 0.0) < self.cfg.ocr_confidence_threshold:
                         result["value"] = ""
                     results[idx] = result
+                # 讯飞手写识别印证（按次计费）：与 Paddle 双引擎相互印证；
+                # 手写姓名讯飞更准（实测敖其泰/乌日汗讯飞全对），非空时优先采用讯飞结果
+                if self._xfyun_hw is not None:
+                    for idx, region in zip(normal_indices, normal_regions):
+                        if region.get("field") not in NAME_FIELD_IDS:
+                            continue
+                        result = results[idx]
+                        paddle_value = result.get("value") or ""
+                        try:
+                            hw_text = self._xfyun_hw.recognize_text(PersonalInfoOcr._crop(image, region))
+                            hw_name = clean_handwritten_name(hw_text)
+                        except Exception as e:
+                            logger.warning("讯飞手写识别失败: %s", e)
+                            continue
+                        if not hw_name:
+                            continue
+                        # 平铺讯飞识别值，供前端与 Paddle 结果相互印证
+                        results.append({"field": "name_xfyun_hw", "value": hw_name, "confidence": 0.99})
+                        final_name = hw_name or paddle_value
+                        if candidate_names:
+                            final_name = best_roster_match(
+                                [hw_name, paddle_value], candidate_names) or final_name
+                        if final_name != paddle_value:
+                            logger.info("[mq] 手写姓名采用讯飞结果: paddle=%s xfyun=%s", paddle_value, final_name)
+                        result["value"] = final_name
+                        if final_name:
+                            result["confidence"] = 0.99
+
+            for idx, region in zip(label_indices, label_regions):
+                # 条码标签区：小区域多变体高精度识别印刷体姓名 + 条码考号；
+                # 讯飞 OCR 大模型双引擎印证（按次计费，与 Paddle 结果并列展示供人工核对）
+                doc_fallback = None
+                if self._xfyun_doc is not None:
+                    doc_fallback = lambda crop: self._xfyun_doc.recognize_lines(crop)
+                strip_result = self._ocr.recognize_label_strip(
+                    image, region, candidate_names, doc_fallback=doc_fallback
+                )
+                results[idx] = {
+                    "field": BARCODE_LABEL_FIELD,
+                    "value": strip_result.get("raw_text", ""),
+                    "confidence": strip_result.get("confidence", 0.0),
+                }
+                # 平铺追加（非空才追加，避免覆盖 block 链路结果）：
+                # printed_name 由 Java 端优先于手写 name 采用
+                if strip_result.get("name"):
+                    results.append({"field": "printed_name", "value": strip_result["name"], "confidence": 1.0})
+                if strip_result.get("exam_no"):
+                    results.append({"field": "exam_no", "value": strip_result["exam_no"], "confidence": 1.0})
+                # 双引擎印证值（前端并列展示）
+                if strip_result.get("paddle_name"):
+                    results.append({"field": "name_paddle", "value": strip_result["paddle_name"], "confidence": 1.0})
+                if strip_result.get("xfyun_doc_name"):
+                    results.append({"field": "name_xfyun_doc", "value": strip_result["xfyun_doc_name"], "confidence": 1.0})
 
             for idx, region in zip(block_indices, block_regions):
                 raw_result = self._ocr.recognize_block(image, region)
