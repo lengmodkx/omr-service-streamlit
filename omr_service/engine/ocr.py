@@ -619,6 +619,50 @@ def recognize_personal_info(
     return PersonalInfoOcr().recognize(image, regions)
 
 
+def crosscheck_handwritten_names(
+    ocr: "PersonalInfoOcr",
+    hw_client: Any,
+    image: np.ndarray,
+    regions: List[Dict[str, Any]],
+    indices: List[int],
+    results: List[Dict[str, Any]],
+    candidate_names: Optional[List[str]],
+    log_prefix: str = "ocr",
+) -> None:
+    """讯飞手写识别印证（core/service.py 与 mq/job_handler.py 共用，避免双份逻辑漂移）。
+
+    手写姓名讯飞更准（实测敖其泰/乌日汗讯飞全对），讯飞非空结果优先采用；
+    讯飞识别值以 name_xfyun_hw 字段平铺到结果列表，供前端与 Paddle 结果并列核对。
+    """
+    from omr_service.engine.personal_info_block_parser import best_roster_match
+
+    if hw_client is None:
+        return
+    for idx, region in zip(indices, regions):
+        if region.get("field") not in NAME_FIELD_IDS:
+            continue
+        result = results[idx]
+        paddle_value = result.get("value") or ""
+        try:
+            hw_text = hw_client.recognize_text(PersonalInfoOcr._crop(image, region))
+            hw_name = clean_handwritten_name(hw_text)
+        except Exception as e:
+            logger.warning("讯飞手写识别失败: %s", e)
+            continue
+        if not hw_name:
+            continue
+        # 平铺讯飞识别值，供前端与 Paddle 结果相互印证
+        results.append({"field": "name_xfyun_hw", "value": hw_name, "confidence": 0.99})
+        final_name = hw_name
+        if candidate_names:
+            final_name = best_roster_match([hw_name, paddle_value], candidate_names) or final_name
+        if final_name != paddle_value:
+            logger.info("[%s] 手写姓名采用讯飞结果: paddle=%s xfyun=%s", log_prefix, paddle_value, final_name)
+        result["value"] = final_name
+        if final_name:
+            result["confidence"] = 0.99
+
+
 def recognize_personal_info_block(
     image: np.ndarray,
     region: Dict[str, Any],

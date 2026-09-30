@@ -391,7 +391,9 @@ def test_recognize_personal_info_barcode_label_flattened(service, mock_deps):
     fields = {r["field"]: r["value"] for r in results}
     assert fields["barcode_label"].startswith("东乌一中")
     assert fields["printed_name"] == "敖其泰"
-    assert fields["exam_no"] == "802200231"
+    # 考号用 printed_exam_no 独立字段，避免与 block 链路平铺的 exam_no 冲突
+    assert fields["printed_exam_no"] == "802200231"
+    assert "exam_no" not in fields
 
 
 def test_recognize_personal_info_low_confidence_cleared(service, mock_deps):

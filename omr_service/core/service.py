@@ -19,9 +19,7 @@ from omr_service.core.exceptions import (
 )
 from omr_service.engine.ocr import (
     BARCODE_LABEL_FIELD,
-    NAME_FIELD_IDS,
-    PersonalInfoOcr,
-    clean_handwritten_name,
+    crosscheck_handwritten_names,
 )
 
 logger = logging.getLogger(__name__)
@@ -308,7 +306,6 @@ class OmrService:
         candidate_names: 该考试的考生名单（花名册），用于姓名候选相似度裁决。
         """
         from omr_service.engine.personal_info_block_parser import (
-            best_roster_match,
             parse_personal_info_block,
             upsert_marked_name,
         )
@@ -354,33 +351,11 @@ class OmrService:
                         if page_result.get("confidence", 0.0) < self.ocr_confidence_threshold:
                             page_result["value"] = ""
                         results[idx] = page_result
-                # 讯飞手写识别印证（按次计费）：与 Paddle 双引擎相互印证；
-                # 手写姓名讯飞更准（实测敖其泰/乌日汗讯飞全对），非空时优先采用讯飞结果
-                if self.xfyun_hw is not None:
-                    for idx, region in zip(normal_indices, normal_regions):
-                        if region.get("field") not in NAME_FIELD_IDS:
-                            continue
-                        result = results[idx]
-                        paddle_value = result.get("value") or ""
-                        try:
-                            hw_text = self.xfyun_hw.recognize_text(PersonalInfoOcr._crop(image, region))
-                            hw_name = clean_handwritten_name(hw_text)
-                        except Exception as e:
-                            logger.warning("讯飞手写识别失败: %s", e)
-                            continue
-                        if not hw_name:
-                            continue
-                        # 平铺讯飞识别值，供前端与 Paddle 结果相互印证
-                        results.append({"field": "name_xfyun_hw", "value": hw_name, "confidence": 0.99})
-                        final_name = hw_name or paddle_value
-                        if candidate_names:
-                            final_name = best_roster_match(
-                                [hw_name, paddle_value], candidate_names) or final_name
-                        if final_name != paddle_value:
-                            logger.info("[ocr] 手写姓名采用讯飞结果: paddle=%s xfyun=%s", paddle_value, final_name)
-                        result["value"] = final_name
-                        if final_name:
-                            result["confidence"] = 0.99
+                # 讯飞手写识别印证（按次计费，共享实现见 crosscheck_handwritten_names）
+                crosscheck_handwritten_names(
+                    self.ocr_engine, self.xfyun_hw, image,
+                    normal_regions, normal_indices, results, candidate_names, "ocr",
+                )
 
             for idx, region in zip(label_indices, label_regions):
                 # 条码标签区：小区域多变体高精度识别印刷体姓名 + 条码考号；
@@ -397,11 +372,12 @@ class OmrService:
                     "confidence": strip_result.get("confidence", 0.0),
                 }
                 # 平铺追加（非空才追加，避免覆盖 block 链路结果）：
-                # printed_name 由 Java 端优先于手写 name 采用
+                # printed_name 由 Java 端优先于手写 name 采用；
+                # 考号用 printed_exam_no 独立字段，避免与 block 链路平铺的 exam_no 冲突
                 if strip_result.get("name"):
                     results.append({"field": "printed_name", "value": strip_result["name"], "confidence": 1.0})
                 if strip_result.get("exam_no"):
-                    results.append({"field": "exam_no", "value": strip_result["exam_no"], "confidence": 1.0})
+                    results.append({"field": "printed_exam_no", "value": strip_result["exam_no"], "confidence": 1.0})
                 # 双引擎印证值（前端并列展示）
                 if strip_result.get("paddle_name"):
                     results.append({"field": "name_paddle", "value": strip_result["paddle_name"], "confidence": 1.0})
