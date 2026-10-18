@@ -12,7 +12,12 @@ from omr_service.config import OmrConfig
 from omr_service.core.exceptions import ImageLoadError
 from omr_service.core.service import OmrService, run_with_timeout
 from omr_service.engine.cropper import SubjectiveCropper
-from omr_service.engine.ocr import BARCODE_LABEL_FIELD, PersonalInfoOcr, crosscheck_handwritten_names
+from omr_service.engine.ocr import (
+    BARCODE_LABEL_FIELD,
+    PersonalInfoOcr,
+    crosscheck_handwritten_names,
+    recognize_barcode_label_strip,
+)
 from omr_service.engine.personal_info_block_parser import parse_personal_info_block, upsert_marked_name
 from omr_service.loader.image_loader import ImageLoader
 from omr_service.loader.template_store import CachedTemplate, TemplateStore
@@ -102,9 +107,14 @@ class BatchJobHandler:
         self.worker_pool = worker_pool
         self.producer = producer
         self.service = service
-        # 讯飞 OCR 增强通道（xfyun_enabled=false 时为 None）
-        from omr_service.engine.xfyun_ocr import build_xfyun_clients
-        self._xfyun_doc, self._xfyun_hw = build_xfyun_clients(cfg)
+        # 讯飞 OCR 增强通道（xfyun_enabled=false 时为 None）：
+        # 优先复用 OmrService 已构建的客户端，避免同进程重复创建 requests.Session/TLS 适配器；
+        # service 缺失（单测/独立使用）或未构建客户端时才按配置自行创建
+        self._xfyun_doc = getattr(service, "xfyun_doc", None) if service is not None else None
+        self._xfyun_hw = getattr(service, "xfyun_hw", None) if service is not None else None
+        if self._xfyun_doc is None and self._xfyun_hw is None:
+            from omr_service.engine.xfyun_ocr import build_xfyun_clients
+            self._xfyun_doc, self._xfyun_hw = build_xfyun_clients(cfg)
         self._ocr = PersonalInfoOcr()
         self._cropper = SubjectiveCropper(
             output_dir=cfg.crop_output_dir,
@@ -265,31 +275,16 @@ class BatchJobHandler:
                 )
 
             for idx, region in zip(label_indices, label_regions):
-                # 条码标签区：小区域多变体高精度识别印刷体姓名 + 条码考号；
-                # 讯飞 OCR 大模型双引擎印证（按次计费，与 Paddle 结果并列展示供人工核对）
-                doc_fallback = None
-                if self._xfyun_doc is not None:
-                    doc_fallback = lambda crop: self._xfyun_doc.recognize_lines(crop)
-                strip_result = self._ocr.recognize_label_strip(
-                    image, region, candidate_names, doc_fallback=doc_fallback
+                # 条码标签区识别 + 平铺字段构造（与 HTTP 链路共用 recognize_barcode_label_strip）
+                strip_result, flattened = recognize_barcode_label_strip(
+                    self._ocr, self._xfyun_doc, image, region, candidate_names,
                 )
                 results[idx] = {
                     "field": BARCODE_LABEL_FIELD,
                     "value": strip_result.get("raw_text", ""),
                     "confidence": strip_result.get("confidence", 0.0),
                 }
-                # 平铺追加（非空才追加，避免覆盖 block 链路结果）：
-                # printed_name 由 Java 端优先于手写 name 采用；
-                # 考号用 printed_exam_no 独立字段，避免与 block 链路平铺的 exam_no 冲突
-                if strip_result.get("name"):
-                    results.append({"field": "printed_name", "value": strip_result["name"], "confidence": 1.0})
-                if strip_result.get("exam_no"):
-                    results.append({"field": "printed_exam_no", "value": strip_result["exam_no"], "confidence": 1.0})
-                # 双引擎印证值（前端并列展示）
-                if strip_result.get("paddle_name"):
-                    results.append({"field": "name_paddle", "value": strip_result["paddle_name"], "confidence": 1.0})
-                if strip_result.get("xfyun_doc_name"):
-                    results.append({"field": "name_xfyun_doc", "value": strip_result["xfyun_doc_name"], "confidence": 1.0})
+                results.extend(flattened)
 
             for idx, region in zip(block_indices, block_regions):
                 raw_result = self._ocr.recognize_block(image, region)

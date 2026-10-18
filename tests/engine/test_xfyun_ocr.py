@@ -128,6 +128,24 @@ class TestExtractTextLines(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(_extract_text_lines(""), [])
 
+    def test_json_text_keeps_numeric_exam_no_line(self):
+        """JSON 输出中的纯数字考号行不能丢（否则标签区永远拿不到讯飞识别的考号）。"""
+        inner = json.dumps(
+            {"pages": [{"lines": [{"content": "东乌一中"}, {"content": "802200231"}]}]},
+            ensure_ascii=False,
+        )
+        lines = _extract_text_lines(inner)
+        self.assertIn("东乌一中", lines)
+        self.assertIn("802200231", lines)
+
+    def test_json_text_drops_non_meaningful_line(self):
+        """既不含中文也不含长数字串的文本片段（如类别标签）应被丢弃。"""
+        inner = json.dumps(
+            {"pages": [{"lines": [{"content": "abc", "label": "12"}, {"content": "东乌一中"}]}]},
+            ensure_ascii=False,
+        )
+        self.assertEqual(["东乌一中"], _extract_text_lines(inner))
+
 
 if __name__ == "__main__":
     unittest.main()

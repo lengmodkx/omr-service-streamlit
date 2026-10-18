@@ -142,6 +142,22 @@ class TestBatchJobHandler(unittest.TestCase):
         handler.producer.send_result.assert_called_once()
 
 
+class TestXfyunClientReuse(unittest.TestCase):
+    """BatchJobHandler 应复用 OmrService 已构建的讯飞客户端，避免同进程重复建 Session。"""
+
+    def test_reuses_service_clients(self):
+        cfg = MagicMock()
+        service = MagicMock()
+        doc, hw = MagicMock(name="doc"), MagicMock(name="hw")
+        service.xfyun_doc = doc
+        service.xfyun_hw = hw
+        handler = BatchJobHandler(
+            cfg, MagicMock(), MagicMock(), MagicMock(), MagicMock(), service=service,
+        )
+        self.assertIs(handler._xfyun_doc, doc)
+        self.assertIs(handler._xfyun_hw, hw)
+
+
 class TestNormalizeRegions(unittest.TestCase):
     """Java camelCase → Python snake_case 字段转换单元测试"""
 

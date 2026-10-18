@@ -20,6 +20,7 @@ from omr_service.core.exceptions import (
 from omr_service.engine.ocr import (
     BARCODE_LABEL_FIELD,
     crosscheck_handwritten_names,
+    recognize_barcode_label_strip,
 )
 
 logger = logging.getLogger(__name__)
@@ -358,31 +359,16 @@ class OmrService:
                 )
 
             for idx, region in zip(label_indices, label_regions):
-                # 条码标签区：小区域多变体高精度识别印刷体姓名 + 条码考号；
-                # 讯飞 OCR 大模型双引擎印证（按次计费，与 Paddle 结果并列展示供人工核对）
-                doc_fallback = None
-                if self.xfyun_doc is not None:
-                    doc_fallback = lambda crop: self.xfyun_doc.recognize_lines(crop)
-                strip_result = self.ocr_engine.recognize_label_strip(
-                    image, region, candidate_names, doc_fallback=doc_fallback
+                # 条码标签区识别 + 平铺字段构造（与 MQ 链路共用 recognize_barcode_label_strip）
+                strip_result, flattened = recognize_barcode_label_strip(
+                    self.ocr_engine, self.xfyun_doc, image, region, candidate_names,
                 )
                 results[idx] = {
                     "field": BARCODE_LABEL_FIELD,
                     "value": strip_result.get("raw_text", ""),
                     "confidence": strip_result.get("confidence", 0.0),
                 }
-                # 平铺追加（非空才追加，避免覆盖 block 链路结果）：
-                # printed_name 由 Java 端优先于手写 name 采用；
-                # 考号用 printed_exam_no 独立字段，避免与 block 链路平铺的 exam_no 冲突
-                if strip_result.get("name"):
-                    results.append({"field": "printed_name", "value": strip_result["name"], "confidence": 1.0})
-                if strip_result.get("exam_no"):
-                    results.append({"field": "printed_exam_no", "value": strip_result["exam_no"], "confidence": 1.0})
-                # 双引擎印证值（前端并列展示）
-                if strip_result.get("paddle_name"):
-                    results.append({"field": "name_paddle", "value": strip_result["paddle_name"], "confidence": 1.0})
-                if strip_result.get("xfyun_doc_name"):
-                    results.append({"field": "name_xfyun_doc", "value": strip_result["xfyun_doc_name"], "confidence": 1.0})
+                results.extend(flattened)
 
             for idx, region in zip(block_indices, block_regions):
                 raw_result = self.ocr_engine.recognize_block(image, region)

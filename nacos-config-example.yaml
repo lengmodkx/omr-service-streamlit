@@ -12,7 +12,7 @@ omr-service:
       result_hash_prefix: omr:batch:result:hash
     worker_pool_size: 4
     consumer_enabled: true
-    # 讯飞 OCR 增强通道（可选，按次计费）：Paddle 无结果时的兜底引擎
+    # 讯飞 OCR 增强通道（可选，按次计费）：与 Paddle 双引擎相互印证（姓名识别时调用）
     # 凭证从讯飞开放平台控制台获取；enabled=false 时以下配置全部忽略
     xfyun_enabled: false
     xfyun_app_id: ""

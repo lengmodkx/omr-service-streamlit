@@ -282,8 +282,13 @@ def _best_roster_match(pool: list, roster: list, cutoff: float = 0.75) -> str:
     return best_name
 
 
-def best_roster_match(pool: list, roster: list, cutoff: float = 0.6) -> str:
-    """公开包装：从候选池中选出与花名册最相似的名字（供 OCR 引擎/服务层复用）。"""
+def best_roster_match(pool: list, roster: list, cutoff: float = 0.75) -> str:
+    """公开包装：从候选池中选出与花名册最相似的名字（供 OCR 引擎/服务层复用）。
+
+    阈值必须与 _best_roster_match 的默认值保持一致：标签条/手写姓名等 OCR 路径都调用
+    本包装且不显式传 cutoff，若默认值偏低（0.6）会让“名单中没有真名”时误配到其他考生
+    （查干其其格→苏都其其格，见 test_roster_match_not_misassign_when_true_name_absent）。
+    """
     return _best_roster_match(pool, roster, cutoff)
 
 

@@ -68,7 +68,7 @@ class OmrConfig:
     # 个人信息 OCR 置信度阈值（低于此值返回空值，避免脏数据）
     ocr_confidence_threshold: float = 0.3
 
-    # 讯飞 OCR 增强通道（默认关闭；按次计费，仅作 Paddle 无结果时的兜底）
+    # 讯飞 OCR 增强通道（默认关闭；按次计费，启用后作为 Paddle 的双引擎印证通道）
     xfyun_enabled: bool = False
     xfyun_app_id: str = ""
     xfyun_doc_api_key: str = ""
@@ -259,7 +259,7 @@ class OmrSettings(BaseSettings):
     # 个人信息 OCR 置信度阈值：低于阈值视为未识别，置空 value（对齐旧 gRPC 分支）
     ocr_confidence_threshold: float = 0.3
 
-    # 讯飞 OCR 增强通道（默认关闭；按次计费，仅作 Paddle 无结果时的兜底）
+    # 讯飞 OCR 增强通道（默认关闭；按次计费，启用后作为 Paddle 的双引擎印证通道）
     xfyun_enabled: bool = False
     xfyun_app_id: str = ""
     xfyun_doc_api_key: str = ""

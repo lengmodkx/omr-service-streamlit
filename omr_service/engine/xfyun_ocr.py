@@ -4,8 +4,9 @@
 - XfyunDocOcr：通用文档识别（OCR 大模型），印刷体标签条识别，HMAC-SHA256 URL 鉴权。
 - XfyunHandwritingOcr：手写文字识别，手写姓名行识别，X-CheckSum（MD5）鉴权。
 
-成本控制：两个接口均按调用次数计费，默认只作为 PaddleOCR 的兜底通道
-（Paddle 无结果时才调用），由调用方控制触发时机。
+成本控制：两个接口均按调用次数计费，默认关闭；启用后作为 PaddleOCR 的双引擎印证通道
+（姓名识别时按字段/标签条调用，见 ocr.py 的 crosscheck_handwritten_names 与
+recognize_label_strip），由调用方控制触发时机。
 
 凭证通过 Nacos（omr-service.yaml 的 xfyun.*）或环境变量（OMR_XFYUN_*）注入，不写入仓库。
 """
@@ -14,6 +15,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import ssl
 import time
 from typing import Any, Dict, List, Optional
@@ -125,11 +127,19 @@ class XfyunDocOcr:
         return _extract_text_lines(text)
 
 
+def _is_meaningful_line(node: str) -> bool:
+    """判断 OCR 文本片段是否值得保留：含中文，或含 6 位以上数字串（考号行可能是纯数字）。"""
+    if any("\u4e00" <= ch <= "\u9fff" for ch in node):
+        return True
+    return bool(re.search(r"\d{6,}", node))
+
+
 def _extract_text_lines(text: str) -> List[str]:
     """把 OCR 大模型输出整理为文本行列表。
 
     result_format=json 时 text 是 JSON 字符串（结构随版本可能变化），
     递归收集所有含中文的字符串值；非 JSON 时按行切分。
+    纯数字行的考号不能丢（否则 recognize_label_strip 永远拿不到讯飞识别出的考号行）。
     """
     text = (text or "").strip()
     if not text:
@@ -144,7 +154,7 @@ def _extract_text_lines(text: str) -> List[str]:
 
             def walk(node: Any) -> None:
                 if isinstance(node, str):
-                    if any("一" <= ch <= "鿿" for ch in node):
+                    if _is_meaningful_line(node):
                         lines.append(node)
                 elif isinstance(node, dict):
                     for v in node.values():

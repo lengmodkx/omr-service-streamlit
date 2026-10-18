@@ -211,6 +211,19 @@ class TestPersonalInfoBlockParser(unittest.TestCase):
         )
         self.assertEqual("赛汗娜", fields.get("name"))
 
+    def test_best_roster_match_wrapper_default_cutoff_guards_misassignment(self):
+        """公开包装 best_roster_match 的默认阈值必须与内部实现一致（0.75）。
+
+        OCR 标签条/手写姓名路径调用包装函数且不传 cutoff，若默认 0.6 会把
+        正确识别结果误配给名单里相近的别人（查干其其格→苏都其其格）。
+        """
+        from omr_service.engine.personal_info_block_parser import best_roster_match
+
+        # 名单里没有真名 → 不得误配
+        self.assertEqual("", best_roster_match(["查干其其格"], ["苏都其其格", "乌达木"]))
+        # 同长度仅差 1 字（OCR 单字误识）→ 正常纠正
+        self.assertEqual("敖其泰", best_roster_match(["放其泰"], ["敖其泰", "乌达木"]))
+
     def test_barcode_marker_exam_no_priority(self):
         """条码考号标记优先于手写考号误识（80220G229），且不被更长数字串覆盖。"""
         raw = "考生号:80220G229\n班级:十班\n8022002291\n印刷体姓名:奈日\n条码考号:802200229"
