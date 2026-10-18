@@ -12,7 +12,12 @@ from omr_service.config import OmrConfig
 from omr_service.core.exceptions import ImageLoadError
 from omr_service.core.service import OmrService, run_with_timeout
 from omr_service.engine.cropper import SubjectiveCropper
-from omr_service.engine.ocr import PersonalInfoOcr
+from omr_service.engine.ocr import (
+    BARCODE_LABEL_FIELD,
+    PersonalInfoOcr,
+    crosscheck_handwritten_names,
+    recognize_barcode_label_strip,
+)
 from omr_service.engine.personal_info_block_parser import parse_personal_info_block, upsert_marked_name
 from omr_service.loader.image_loader import ImageLoader
 from omr_service.loader.template_store import CachedTemplate, TemplateStore
@@ -102,6 +107,14 @@ class BatchJobHandler:
         self.worker_pool = worker_pool
         self.producer = producer
         self.service = service
+        # 讯飞 OCR 增强通道（xfyun_enabled=false 时为 None）：
+        # 优先复用 OmrService 已构建的客户端，避免同进程重复创建 requests.Session/TLS 适配器；
+        # service 缺失（单测/独立使用）或未构建客户端时才按配置自行创建
+        self._xfyun_doc = getattr(service, "xfyun_doc", None) if service is not None else None
+        self._xfyun_hw = getattr(service, "xfyun_hw", None) if service is not None else None
+        if self._xfyun_doc is None and self._xfyun_hw is None:
+            from omr_service.engine.xfyun_ocr import build_xfyun_clients
+            self._xfyun_doc, self._xfyun_hw = build_xfyun_clients(cfg)
         self._ocr = PersonalInfoOcr()
         self._cropper = SubjectiveCropper(
             output_dir=cfg.crop_output_dir,
@@ -234,10 +247,16 @@ class BatchJobHandler:
             normal_indices = []
             block_regions = []
             block_indices = []
+            label_regions = []
+            label_indices = []
             for idx, region in indexed_regions:
-                if region.get("field") == STUDENT_INFO_BLOCK_FIELD:
+                field = region.get("field")
+                if field == STUDENT_INFO_BLOCK_FIELD:
                     block_regions.append(region)
                     block_indices.append(idx)
+                elif field == BARCODE_LABEL_FIELD:
+                    label_regions.append(region)
+                    label_indices.append(idx)
                 else:
                     normal_regions.append(region)
                     normal_indices.append(idx)
@@ -249,6 +268,23 @@ class BatchJobHandler:
                     if result.get("confidence", 0.0) < self.cfg.ocr_confidence_threshold:
                         result["value"] = ""
                     results[idx] = result
+                # 讯飞手写识别印证（按次计费，共享实现见 crosscheck_handwritten_names）
+                crosscheck_handwritten_names(
+                    self._ocr, self._xfyun_hw, image,
+                    normal_regions, normal_indices, results, candidate_names, "mq",
+                )
+
+            for idx, region in zip(label_indices, label_regions):
+                # 条码标签区识别 + 平铺字段构造（与 HTTP 链路共用 recognize_barcode_label_strip）
+                strip_result, flattened = recognize_barcode_label_strip(
+                    self._ocr, self._xfyun_doc, image, region, candidate_names,
+                )
+                results[idx] = {
+                    "field": BARCODE_LABEL_FIELD,
+                    "value": strip_result.get("raw_text", ""),
+                    "confidence": strip_result.get("confidence", 0.0),
+                }
+                results.extend(flattened)
 
             for idx, region in zip(block_indices, block_regions):
                 raw_result = self._ocr.recognize_block(image, region)

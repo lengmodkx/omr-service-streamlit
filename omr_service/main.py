@@ -41,6 +41,10 @@ def _setup_dependencies(settings: OmrSettings) -> tuple[OmrService, TaskRegistry
     ocr_engine = PersonalInfoOcr()  # 懒加载
     cropper = SubjectiveCropper(output_dir=settings.crop_output_dir, base_url=settings.crop_base_url)
 
+    # 讯飞 OCR 增强通道（xfyun_enabled=false 时为 None）
+    from omr_service.engine.xfyun_ocr import build_xfyun_clients
+    xfyun_doc, xfyun_hw = build_xfyun_clients(settings)
+
     service = OmrService(
         template_store=template_store,
         image_loader=image_loader,
@@ -50,6 +54,8 @@ def _setup_dependencies(settings: OmrSettings) -> tuple[OmrService, TaskRegistry
         sync_timeout_seconds=settings.sync_timeout_seconds,
         ocr_timeout_seconds=settings.ocr_timeout_seconds,
         ocr_confidence_threshold=settings.ocr_confidence_threshold,
+        xfyun_doc=xfyun_doc,
+        xfyun_hw=xfyun_hw,
     )
 
     # 复用 Redis client

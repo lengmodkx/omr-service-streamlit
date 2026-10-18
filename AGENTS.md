@@ -172,6 +172,10 @@ Redis Stream 批量任务消费与结果生产。
 
 OMR 识别引擎。
 
+- `ocr.py`：PaddleOCR 个人信息识别（手写字段 + `student_info_block` 整块 + `barcode_label` 条码标签区小区域多变体识别 + 条码锚定标签条 OCR）；
+- `personal_info_block_parser.py`：考生信息区文本解析（印刷体标记/锚点 > 手写标签 > 启发式）+ 花名册相似度裁决（`candidate_names` 随任务下发）；
+- `xfyun_ocr.py`：讯飞 OCR 增强通道（可选，默认关闭，按次计费）：OCR 大模型（印刷标签条印证）+ 手写文字识别（手写姓名印证，讯飞更准优先采用）；双引擎识别值以 `name_paddle`/`name_xfyun_doc`/`name_xfyun_hw` 平铺供前端印证展示；配置走 Nacos `xfyun.*` 或环境变量 `OMR_XFYUN_*`。
+
 ## Development Conventions
 
 - 所有新增代码注释、日志、文档使用中文。

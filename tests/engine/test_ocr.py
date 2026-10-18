@@ -177,6 +177,249 @@ class TestPersonalInfoOcr(unittest.TestCase):
         with patch.dict(sys.modules, {"pyzbar": None, "pyzbar.pyzbar": None}):
             self.assertEqual(self.ocr._decode_barcodes_robust(self.image), [])
 
+    def test_clean_handwritten_name_skips_misread_label_residue(self):
+        """姓名标签被 OCR 误读（考生娃名）时不能把标签残留当成姓名。"""
+        from omr_service.engine.ocr import clean_handwritten_name
+
+        # 标签误读 + 空格分隔的真实姓名
+        self.assertEqual("张三", clean_handwritten_name("考生娃名 张三"))
+        # 标签词残留（“考生 张三”原先会返回“考生”）
+        self.assertEqual("张三", clean_handwritten_name("考生 张三"))
+        # 正常“姓名：”前缀
+        self.assertEqual("张三", clean_handwritten_name("姓名：张三"))
+        # 整行只有标签残留时返回空，而不是标签词
+        self.assertEqual("", clean_handwritten_name("考生姓名"))
+
+    def test_pick_exam_no_barcode_prefers_region_hit(self):
+        """整页兜底时多个条码：优先取落在标签区内的条码，避免二维码被当成考号。"""
+        hits = [
+            ("https://example.com/page/123456", (350, 180, 80, 20)),  # 页面其它二维码
+            ("802200231", (50, 30, 80, 20)),                          # 标签区内考号条码
+        ]
+        region = {"x1": 0, "y1": 0, "x2": 200, "y2": 150}
+        self.assertEqual("802200231", PersonalInfoOcr._pick_exam_no_barcode(hits, region))
+
+    def test_pick_exam_no_barcode_validates_digits(self):
+        """无位置信息时用数字校验挑考号条码，跳过不含数字串的条码/二维码。"""
+        hits = [("QRCODE-NO-DIGITS", None), ("802200231", None)]
+        self.assertEqual("802200231", PersonalInfoOcr._pick_exam_no_barcode(hits))
+        # 无有效数字串时保留原始解码值（兼容字母数字混排考号）
+        self.assertEqual("AB-CD", PersonalInfoOcr._pick_exam_no_barcode([("AB-CD", None)]))
+
+    def test_recognize_label_strip_page_fallback_prefers_label_region_barcode(self):
+        """标签区内解码失败整页兜底时，应取标签区位置的条码而不是页面上第一个条码。"""
+        import sys
+        import types
+        from collections import namedtuple
+        from unittest.mock import patch
+
+        Rect = namedtuple("Rect", ["left", "top", "width", "height"])
+
+        class QrBarcode:
+            data = b"https://example.com/page/123456"
+            rect = Rect(350, 180, 60, 60)  # 页面右下角，标签区之外
+
+        class ExamBarcode:
+            data = b"802200231"
+            rect = Rect(50, 30, 80, 20)    # 落在标签区内
+
+        def fake_decode(img):
+            # 仅整页原图（300x600）返回条码；标签区及其放大变体均解码失败
+            if img.shape[:2] != image.shape[:2]:
+                return []
+            return [QrBarcode(), ExamBarcode()]
+
+        class EmptyEngine:
+            def ocr(self, image, cls=True):
+                return [[]]
+
+        self.ocr._ocr_engine = EmptyEngine()
+        image = np.full((300, 600, 3), 255, dtype=np.uint8)
+        region = {"field": "barcode_label", "x1": 0, "y1": 0, "x2": 300, "y2": 200}
+        fake_pyzbar = types.ModuleType("pyzbar")
+        fake_pyzbar_py = types.ModuleType("pyzbar.pyzbar")
+        fake_pyzbar_py.decode = fake_decode
+        with patch.dict(sys.modules, {"pyzbar": fake_pyzbar, "pyzbar.pyzbar": fake_pyzbar_py}):
+            result = self.ocr.recognize_label_strip(image, region)
+        self.assertEqual("802200231", result["exam_no"])
+
+    def test_recognize_label_strip_with_roster_adjudication(self):
+        """条码标签区：多变体候选 + 条码考号 + 花名册裁决纠正误识。"""
+        import sys
+        import types
+        from collections import namedtuple
+        from unittest.mock import patch
+
+        Rect = namedtuple("Rect", ["left", "top", "width", "height"])
+
+        class FakeBarcode:
+            data = b"802200231"
+            rect = Rect(10, 20, 80, 20)
+
+        def fake_decode(img):
+            return [FakeBarcode()]
+
+        class StripEngine:
+            """3 个变体依次返回：误识 / 正确 / 误识"""
+
+            LINES = [
+                ["东乌一中", "放其泰 班级:四班"],
+                ["东乌一中", "敖其泰 班级:四班"],
+                ["东乌一中", "效其焱"],
+            ]
+
+            def __init__(self):
+                self.calls = 0
+
+            def ocr(self, image, cls=True):
+                lines = self.LINES[min(self.calls, 2)]
+                self.calls += 1
+                return [[(None, (t, 0.9)) for t in lines]]
+
+        engine = StripEngine()
+        self.ocr._ocr_engine = engine
+        region = {"field": "barcode_label", "x1": 0, "y1": 0, "x2": 200, "y2": 100}
+
+        fake_pyzbar = types.ModuleType("pyzbar")
+        fake_pyzbar_py = types.ModuleType("pyzbar.pyzbar")
+        fake_pyzbar_py.decode = fake_decode
+        with patch.dict(sys.modules, {"pyzbar": fake_pyzbar, "pyzbar.pyzbar": fake_pyzbar_py}):
+            result = self.ocr.recognize_label_strip(
+                self.image, region, candidate_names=["敖其泰", "乌达木"]
+            )
+
+        self.assertEqual(engine.calls, 3, "标签条应跑 3 个预处理变体")
+        self.assertEqual(result["exam_no"], "802200231")
+        self.assertEqual(result["name"], "敖其泰", "花名册裁决应把误识纠正为名单真名")
+        self.assertIn("敖其泰", result["name_candidates"])
+        self.assertIn("条码考号:802200231", result["raw_text"])
+        self.assertIn("印刷体姓名:敖其泰", result["raw_text"])
+
+    def test_recognize_label_strip_without_roster_uses_first_candidate(self):
+        """无花名册时使用主变体候选，不做纠正。"""
+        import sys
+        import types
+        from unittest.mock import patch
+
+        def fake_decode(img):
+            return []
+
+        class StripEngine:
+            def ocr(self, image, cls=True):
+                return [[(None, ("东乌一中", 0.9)), (None, ("放其泰 班级:四班", 0.9))]]
+
+        self.ocr._ocr_engine = StripEngine()
+        region = {"field": "barcode_label", "x1": 0, "y1": 0, "x2": 200, "y2": 100}
+        fake_pyzbar = types.ModuleType("pyzbar")
+        fake_pyzbar_py = types.ModuleType("pyzbar.pyzbar")
+        fake_pyzbar_py.decode = fake_decode
+        with patch.dict(sys.modules, {"pyzbar": fake_pyzbar, "pyzbar.pyzbar": fake_pyzbar_py}):
+            result = self.ocr.recognize_label_strip(self.image, region)
+        self.assertEqual(result["name"], "放其泰")
+        self.assertEqual(result["exam_no"], "")
+
+    def test_recognize_label_strip_doc_fallback_when_paddle_has_no_name(self):
+        """Paddle 无姓名候选时，讯飞生成候选并成为最终姓名（始终调用，非仅兜底）。"""
+        import sys
+        import types
+        from unittest.mock import patch
+
+        def fake_decode(img):
+            return []
+
+        class NoNameEngine:
+            """只识别出学校/班级行，无姓名候选"""
+
+            def ocr(self, image, cls=True):
+                return [[(None, ("东乌一中", 0.9)), (None, ("班级:四班", 0.9))]]
+
+        calls = []
+
+        def doc_fallback(crop):
+            calls.append(crop)
+            return ["东乌一中", "敖其泰", "班级:四班"]
+
+        self.ocr._ocr_engine = NoNameEngine()
+        region = {"field": "barcode_label", "x1": 0, "y1": 0, "x2": 200, "y2": 100}
+        fake_pyzbar = types.ModuleType("pyzbar")
+        fake_pyzbar_py = types.ModuleType("pyzbar.pyzbar")
+        fake_pyzbar_py.decode = fake_decode
+        with patch.dict(sys.modules, {"pyzbar": fake_pyzbar, "pyzbar.pyzbar": fake_pyzbar_py}):
+            result = self.ocr.recognize_label_strip(self.image, region, doc_fallback=doc_fallback)
+        self.assertEqual(len(calls), 1, "讯飞印证应被调用")
+        # Paddle 无候选，讯飞值成为最终姓名
+        self.assertEqual(result["name"], "敖其泰")
+        self.assertEqual(result["xfyun_doc_name"], "敖其泰")
+        self.assertEqual(result["paddle_name"], "")
+
+    def test_recognize_label_strip_barcode_page_fallback(self):
+        """框选裁残导致标签区内条码解码失败时，应整页兜底解码考号。"""
+        import sys
+        import types
+        from collections import namedtuple
+        from unittest.mock import patch
+
+        Rect = namedtuple("Rect", ["left", "top", "width", "height"])
+
+        class FakeBarcode:
+            data = b"802200237"
+            rect = Rect(300, 50, 80, 20)  # 条码在标签区框外
+
+        calls = []
+
+        def fake_decode(img):
+            calls.append(img.shape)
+            # 小 crop（标签区）解码失败，整页（更大）解码成功
+            return [FakeBarcode()] if img.shape[0] >= self.image.shape[0] else []
+
+        class EmptyEngine:
+            def ocr(self, image, cls=True):
+                return [[]]
+
+        self.ocr._ocr_engine = EmptyEngine()
+        # 标签区框明显小于整页
+        region = {"field": "barcode_label", "x1": 0, "y1": 0, "x2": 50, "y2": 30}
+        fake_pyzbar = types.ModuleType("pyzbar")
+        fake_pyzbar_py = types.ModuleType("pyzbar.pyzbar")
+        fake_pyzbar_py.decode = fake_decode
+        with patch.dict(sys.modules, {"pyzbar": fake_pyzbar, "pyzbar.pyzbar": fake_pyzbar_py}):
+            result = self.ocr.recognize_label_strip(self.image, region)
+        self.assertEqual(result["exam_no"], "802200237")
+        self.assertIn("条码考号:802200237", result["raw_text"])
+        self.assertGreaterEqual(len(calls), 2, "应先尝试标签区，再整页兜底")
+
+    def test_recognize_label_strip_doc_cross_validation(self):
+        """双引擎印证：Paddle 有候选时讯飞也调用，两者的值都输出供前端并列展示。"""
+        import sys
+        import types
+        from unittest.mock import patch
+
+        def fake_decode(img):
+            return []
+
+        class NameEngine:
+            def ocr(self, image, cls=True):
+                return [[(None, ("东乌一中", 0.9)), (None, ("放其泰 班级:四班", 0.9))]]
+
+        calls = []
+
+        def doc_fallback(crop):
+            calls.append(crop)
+            return ["东乌一中", "敖其泰", "班级:四班"]
+
+        self.ocr._ocr_engine = NameEngine()
+        region = {"field": "barcode_label", "x1": 0, "y1": 0, "x2": 200, "y2": 100}
+        fake_pyzbar = types.ModuleType("pyzbar")
+        fake_pyzbar_py = types.ModuleType("pyzbar.pyzbar")
+        fake_pyzbar_py.decode = fake_decode
+        with patch.dict(sys.modules, {"pyzbar": fake_pyzbar, "pyzbar.pyzbar": fake_pyzbar_py}):
+            result = self.ocr.recognize_label_strip(self.image, region, doc_fallback=doc_fallback)
+        self.assertEqual(len(calls), 1, "讯飞印证应始终调用")
+        # Paddle 主候选优先，讯飞值进入候选池与印证字段
+        self.assertEqual(result["paddle_name"], "放其泰")
+        self.assertEqual(result["xfyun_doc_name"], "敖其泰")
+        self.assertIn("敖其泰", result["name_candidates"])
+
     def test_decode_barcodes_robust_tries_preprocess_variants(self):
         """原图解码失败时应继续尝试预处理变体，任一成功即返回。"""
         import sys

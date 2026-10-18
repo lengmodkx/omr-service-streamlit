@@ -17,6 +17,11 @@ from omr_service.core.exceptions import (
     InvalidRequestError,
     TemplateNotFoundError,
 )
+from omr_service.engine.ocr import (
+    BARCODE_LABEL_FIELD,
+    crosscheck_handwritten_names,
+    recognize_barcode_label_strip,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +181,8 @@ class OmrService:
         sync_timeout_seconds: float = 60.0,
         ocr_timeout_seconds: float = 30.0,
         ocr_confidence_threshold: float = 0.3,
+        xfyun_doc=None,
+        xfyun_hw=None,
     ):
         self.template_store = template_store
         self.image_loader = image_loader
@@ -188,6 +195,9 @@ class OmrService:
         self.ocr_confidence_threshold = ocr_confidence_threshold
         # 考生信息区字段标识（与 Java 端 OmrPayloadBuilder.STUDENT_INFO_BLOCK_FIELD 对齐）
         self.student_info_block_field = "student_info_block"
+        # 讯飞 OCR 增强通道（可选，None 表示未启用）：doc=OCR大模型(印刷), hw=手写识别
+        self.xfyun_doc = xfyun_doc
+        self.xfyun_hw = xfyun_hw
 
     def recognize(self, request: dict[str, Any]) -> dict[str, Any]:
         """同步识别. 返回 RecognizeResult dict."""
@@ -319,10 +329,15 @@ class OmrService:
 
             image = images[page_index]
             normal_regions, normal_indices, block_regions, block_indices = [], [], [], []
+            label_regions, label_indices = [], []
             for idx, region in indexed_regions:
-                if region.get("field") == self.student_info_block_field:
+                field = region.get("field")
+                if field == self.student_info_block_field:
                     block_regions.append(region)
                     block_indices.append(idx)
+                elif field == BARCODE_LABEL_FIELD:
+                    label_regions.append(region)
+                    label_indices.append(idx)
                 else:
                     normal_regions.append(region)
                     normal_indices.append(idx)
@@ -337,6 +352,23 @@ class OmrService:
                         if page_result.get("confidence", 0.0) < self.ocr_confidence_threshold:
                             page_result["value"] = ""
                         results[idx] = page_result
+                # 讯飞手写识别印证（按次计费，共享实现见 crosscheck_handwritten_names）
+                crosscheck_handwritten_names(
+                    self.ocr_engine, self.xfyun_hw, image,
+                    normal_regions, normal_indices, results, candidate_names, "ocr",
+                )
+
+            for idx, region in zip(label_indices, label_regions):
+                # 条码标签区识别 + 平铺字段构造（与 MQ 链路共用 recognize_barcode_label_strip）
+                strip_result, flattened = recognize_barcode_label_strip(
+                    self.ocr_engine, self.xfyun_doc, image, region, candidate_names,
+                )
+                results[idx] = {
+                    "field": BARCODE_LABEL_FIELD,
+                    "value": strip_result.get("raw_text", ""),
+                    "confidence": strip_result.get("confidence", 0.0),
+                }
+                results.extend(flattened)
 
             for idx, region in zip(block_indices, block_regions):
                 raw_result = self.ocr_engine.recognize_block(image, region)
