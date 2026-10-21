@@ -34,6 +34,7 @@ _NACOS_KEY_MAP: Dict[str, str] = {
     "nacos_group_name": "nacos_group",
     "crop_output_dir": "crop_output_dir",
     "crop_base_url": "crop_base_url",
+    "crop.retention-days": "crop_retention_days",
     "sync_timeout_seconds": "sync_timeout_seconds",
 }
 

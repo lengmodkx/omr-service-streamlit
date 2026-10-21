@@ -276,6 +276,8 @@ class OmrSettings(BaseSettings):
     image_max_bytes: int = 50 * 1024 * 1024
     crop_output_dir: str = "./output"
     crop_base_url: str = ""
+    # 本地裁图保留天数，0 表示不清理；MinIO 副本不受此任务影响
+    crop_retention_days: int = 30
 
     # 兼容期
     legacy_dubbo_port: Optional[int] = None

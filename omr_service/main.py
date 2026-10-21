@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
 import uvicorn
 
@@ -16,6 +18,7 @@ from omr_service.api.app import create_app
 from omr_service.config import OmrSettings, load_settings
 from omr_service.core.service import OmrService
 from omr_service.core.task_registry import TaskRegistry
+from omr_service.engine.crop_cleaner import clean_expired_crops
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,32 @@ def _start_consumer(settings: OmrSettings, service: OmrService, template_store=N
         return None
 
 
+def _start_crop_cleaner(settings: OmrSettings):
+    """启动每日 03:30 的本地裁图清理守护线程。"""
+    if settings.crop_retention_days <= 0:
+        logger.info("本地裁图清理已停用，保留期配置为 %s 天", settings.crop_retention_days)
+        return None
+    stop_event = threading.Event()
+
+    def run():
+        while not stop_event.is_set():
+            now = datetime.now()
+            next_run = now.replace(hour=3, minute=30, second=0, microsecond=0)
+            if now >= next_run:
+                next_run += timedelta(days=1)
+            if stop_event.wait(max(1.0, (next_run - now).total_seconds())):
+                break
+            try:
+                clean_expired_crops(settings.crop_output_dir, settings.crop_retention_days)
+            except Exception:
+                logger.exception("本地裁图定时清理执行失败")
+
+    thread = threading.Thread(target=run, name="omr-crop-cleaner", daemon=True)
+    thread.start()
+    logger.info("本地裁图清理线程已启动：保留 %s 天，每日 03:30 执行", settings.crop_retention_days)
+    return stop_event
+
+
 def _start_nacos(settings: OmrSettings) -> None:
     """启动 Nacos 注册 + 配置监听."""
     if not settings.nacos_enabled:
@@ -130,16 +159,20 @@ def main() -> None:
 
     # 使用 lifespan 管理 Nacos 注册与 Consumer 生命周期
     consumer_ref: list = [None]  # 闭包可变引用传递
+    crop_cleaner_ref: list = [None]
 
     @asynccontextmanager
     async def lifespan(app_instance):
         # startup
         consumer_ref[0] = _start_consumer(settings, service, template_store=shared_template_store)
+        crop_cleaner_ref[0] = _start_crop_cleaner(settings)
         _start_nacos(settings)
         yield
         # shutdown
         logger.info("Shutting down OMR service")
         _deregister_nacos()
+        if crop_cleaner_ref[0] is not None:
+            crop_cleaner_ref[0].set()
         if consumer_ref[0] is not None:
             try:
                 consumer_ref[0].stop()
