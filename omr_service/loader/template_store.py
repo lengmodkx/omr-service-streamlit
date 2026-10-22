@@ -1,5 +1,6 @@
 """模板缓存 — 内存存储解析后的模板上下文"""
 import copy
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -8,6 +9,16 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from omr_service.engine.standard_template import StandardTemplate
+
+logger = logging.getLogger(__name__)
+
+
+def _bubble_page(bubble: Dict[str, Any]) -> int:
+    """取气泡所属页码（脏数据回退 0）。"""
+    try:
+        return int(bubble.get("page_index", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 @dataclass
@@ -71,9 +82,33 @@ class TemplateStore:
             old_subjective[key] = r
         merged_subjective = list(old_subjective.values())
 
-        # 气泡：追加并保留 page_index 标记
+        # 气泡：追加并保留 page_index 标记；同 (题号, 选项) 出现在不同页时告警
+        # （题号跨页重复的早期信号，解析阶段允许，识别阶段会直接报错）
         merged_bubbles = list(getattr(old.standard_template, "bubbles", []) or [])
-        merged_bubbles.extend(getattr(new.standard_template, "bubbles", []) or [])
+        bubble_page = {(b.get("q"), b.get("opt")): _bubble_page(b) for b in merged_bubbles}
+        for b in getattr(new.standard_template, "bubbles", []) or []:
+            key = (b.get("q"), b.get("opt"))
+            page = _bubble_page(b)
+            prev_page = bubble_page.get(key)
+            if prev_page is not None and prev_page != page:
+                logger.warning(
+                    "模板气泡跨页重复: 题号=%s 选项=%s 第%d页与第%d页",
+                    b.get("q"), b.get("opt"), prev_page + 1, page + 1,
+                )
+            bubble_page.setdefault(key, page)
+            merged_bubbles.append(b)
+
+        # 标准答案：跨页合并（键为整卷绝对题号）。
+        # 之前只替换 bubbles 不合并 answers，导致第 2 页标准答案丢失、correct 全为 None。
+        merged_answers = dict(getattr(old.standard_template, "answers", None) or {})
+        for q, ans in (getattr(new.standard_template, "answers", None) or {}).items():
+            if q in merged_answers and merged_answers[q] != ans:
+                # 同题号不同答案 = 题号跨页重复的早期信号（识别阶段会直接报错）
+                logger.warning(
+                    "模板题号跨页重复且标准答案不一致: 题号=%s 旧答案=%s 新答案=%s",
+                    q, merged_answers[q], ans,
+                )
+            merged_answers[q] = ans
 
         # 保留旧的 StandardTemplate 作为默认参考图（通常是 A 面），
         # 避免后页（B 面）调用覆盖默认参考图导致 A 面选择题 ECC 对齐失败。
@@ -81,6 +116,7 @@ class TemplateStore:
         # deep copy 避免修改共享缓存
         merged_template = copy.deepcopy(old.standard_template)
         merged_template.bubbles = merged_bubbles
+        merged_template.answers = merged_answers
 
         # 合并多页参考图
         merged_page_images = dict(old.page_images or {})

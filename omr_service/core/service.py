@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 import time
@@ -219,16 +220,10 @@ class OmrService:
         except TimeoutError as e:
             raise InternalError(f"识别超时 ({self.sync_timeout_seconds}s)") from e
 
-        # 同时输出 bubbles (按气泡坐标) 供前端可视化
-        bubble_grid = []
-        stp = getattr(cached, "standard_template", None)
-        if stp is not None and hasattr(stp, "bubbles"):
-            for b in stp.bubbles:
-                bubble_grid.append({
-                    "q": b.get("q"), "opt": b.get("opt"),
-                    "x": b.get("x"), "y": b.get("y"),
-                    "w": b.get("w"), "h": b.get("h"),
-                })
+        # 同时输出 bubbles (按气泡坐标) 供前端可视化。
+        # 多页模板必须按 page_index 合并各页气泡（带 page_index），
+        # 不能直接输出合并后的全量气泡，否则前端无法区分页面。
+        bubble_grid = self.build_multipage_bubble_grid(cached)
 
         result = {
             "code": 0,
@@ -538,34 +533,160 @@ class OmrService:
         except (TypeError, ValueError):
             return None
 
-    def _do_recognize(self, cached, images, request):
-        """真实识别流程 (从 rpc/omr_service.py 迁移).
+    # ---------- 多页识别（HTTP /v1/recognize 与 MQ 批量识别共用） ----------
 
-        cached: CachedTemplate 实例
-        返回 (answers, abnormal). answers 是 list of dict.
+    @staticmethod
+    def _bubbles_by_page(template) -> Dict[int, List[Dict[str, Any]]]:
+        """按 page_index 归组模板气泡，返回按页码升序的 {page: bubbles}。"""
+        grouped: Dict[int, List[Dict[str, Any]]] = {}
+        for b in getattr(template, "bubbles", None) or []:
+            grouped.setdefault(_as_int(b.get("page_index", 0)), []).append(b)
+        return {page: grouped[page] for page in sorted(grouped)}
+
+    @staticmethod
+    def _bubble_entry(bubble: Dict[str, Any], page: int) -> Dict[str, Any]:
+        """构造对外输出的单气泡坐标（保留 page_index，供前端按页可视化）。"""
+        return {
+            "q": bubble.get("q"),
+            "opt": bubble.get("opt"),
+            "x": bubble.get("x"),
+            "y": bubble.get("y"),
+            "w": bubble.get("w"),
+            "h": bubble.get("h"),
+            "page_index": page,
+        }
+
+    def build_multipage_bubble_grid(self, cached) -> List[Dict[str, Any]]:
+        """构造多页气泡坐标：按页码顺序合并各页气泡并保留 page_index。
+
+        与 recognize_pages 内部的 bubble_grid 使用同一套气泡结构（同源），
+        供 recognize 返回给前端做多页可视化。
         """
-        from omr_service.engine.recognizers.standard import StandardTemplateRecognizer
-        from omr_service.engine.recognizer import RecognizeContext
+        template = getattr(cached, "standard_template", None)
+        if template is None:
+            return []
+        grouped = self._bubbles_by_page(template)
+        page_keys = sorted(getattr(cached, "page_images", None) or {}) or [0]
+        return [
+            self._bubble_entry(b, page)
+            for page in page_keys
+            for b in grouped.get(page, [])
+        ]
 
-        # 从 CachedTemplate 中取出 StandardTemplate
+    @staticmethod
+    def _build_page_template(template, page: int, page_bubbles: List[Dict[str, Any]], page_image):
+        """构造单页专用模板（浅拷贝，避免污染共享缓存）。
+
+        必须替换 .image：StandardTemplate.recognize 用 self.image 做全局 ECC 参考图
+        （engine/standard_template.py 中 cv2.findTransformECC(ref_blur, blurred, ...)），
+        否则第 2 页会拿第 1 页黄金图做对齐，导致识别错位。
+        标准答案也按该页题号裁剪，避免跨页题号互相污染。
+        """
+        page_template = copy.copy(template)
+        page_template.bubbles = page_bubbles
+        page_template.image = page_image
+        template_answers = getattr(template, "answers", None) or {}
+        page_questions = {b.get("q") for b in page_bubbles}
+        page_template.answers = (
+            {q: template_answers[q] for q in page_questions if q in template_answers}
+            if template_answers else {}
+        )
+        return page_template
+
+    def recognize_pages(self, cached, images) -> tuple[dict, list, bool, int]:
+        """按 page_index 逐页识别并合并；返回 (answers_map, bubble_grid, abnormal, total)。
+
+        背景：引擎题号是整卷绝对题号（standard_template.py: qn = start_q + qi），
+        page_index 只挂在气泡上；模板缓存把多页气泡合并进同一个 standard_template，
+        page_images 按页码保存各页黄金参考图。若直接用合并后的全部气泡在第 1 页图上
+        采样，第 2 页题号会答串、第 1 页结果被污染（"多页答题卡只识别第一页"缺陷）。
+        因此这里按页拆开：每页只给本页气泡 + 本页黄金参考图，识别后按题号合并。
+
+        返回：
+        - answers_map: {题号: {"answer": str|None, "status": str, "correct": bool|None}}
+        - bubble_grid: 各页气泡坐标合并结果（保留 page_index）
+        - abnormal: 是否任一页出现卡片级异常
+        - total: 各页识别题目数之和
+
+        跨页同题号视为模板配置错误，直接抛 InvalidRequestError，绝不静默覆盖。
+        """
+        from omr_service.engine.recognizer import RecognizeContext
+        from omr_service.engine.recognizers.standard import StandardTemplateRecognizer
+
         template = getattr(cached, "standard_template", None)
         if template is None or not hasattr(template, "recognize"):
             logger.error("CachedTemplate 中无 StandardTemplate: %s", type(cached))
-            return [], False
+            return {}, [], False, 0
 
-        # 把模板里缓存的 standard_answers 注入到 context
-        ctx = RecognizeContext(
-            standard_answers=getattr(template, "answers", {}) or {},
-            column_boxes=[],
+        page_images = getattr(cached, "page_images", None) or {}
+        # 页码顺序：以缓存中的页码升序为准；无页码缓存时按图片顺序（兼容单页模板）
+        page_keys = sorted(page_images.keys()) or [0]
+        grouped = self._bubbles_by_page(template)
+
+        answers_map: Dict[Any, Dict[str, Any]] = {}
+        bubble_grid: List[Dict[str, Any]] = []
+        question_page: Dict[Any, int] = {}
+        duplicate_questions: List[Any] = []
+        abnormal = False
+        total = 0
+
+        image_list = images if isinstance(images, (list, tuple)) else [images]
+        for idx, image in enumerate(image_list):
+            # 第 i 张图对应 page_keys[i]，图片数超出页码数时回退为 i
+            page = page_keys[idx] if idx < len(page_keys) else idx
+            page_bubbles = grouped.get(page, [])
+            if not page_bubbles:
+                # 兼容"某页只有个人信息/主观题"的模板：该页无选择题气泡，跳过但不算失败
+                logger.warning("第 %d 页无气泡配置，跳过识别", page + 1)
+                continue
+
+            # 本页黄金参考图（numpy 数组不能用 `or` 判空，必须显式 None 判断）
+            page_image = page_images.get(page)
+            if page_image is None:
+                page_image = getattr(template, "image", None)
+            page_template = self._build_page_template(template, page, page_bubbles, page_image)
+            recognizer = StandardTemplateRecognizer(standard_template=page_template)
+            # 标准答案按该页题号注入，保证 correct 只与该页标准答案比对
+            ctx = RecognizeContext(standard_answers=page_template.answers, column_boxes=[])
+            result = recognizer.recognize(image, ctx)
+
+            for q, info in (result.answers or {}).items():
+                # 同一题号出现在不同页 → 模板题号跨页重复，记录后统一报错
+                if q in answers_map and question_page.get(q) != page:
+                    duplicate_questions.append(q)
+                question_page.setdefault(q, page)
+                answers_map[q] = info
+
+            bubble_grid.extend(self._bubble_entry(b, page) for b in page_bubbles)
+            if result.card_flag in ("abnormal", "suspicious_blank"):
+                abnormal = True
+            total += _as_int(getattr(result, "total", 0))
+
+        if duplicate_questions:
+            labels = ",".join(f"Q{q}" for q in sorted(set(duplicate_questions), key=str))
+            logger.error("模板题号跨页重复：%s", labels)
+            raise InvalidRequestError(
+                f"模板题号跨页重复：{labels}，请把题号改为整卷唯一后重新解析模板"
+            )
+
+        logger.info(
+            "多页识别完成: pages=%d questions=%d abnormal=%s",
+            len(image_list), len(answers_map), abnormal,
         )
-        recognizer = StandardTemplateRecognizer(standard_template=template)
-        image = images[0] if isinstance(images, list) else images
-        result = recognizer.recognize(image, ctx)
+        return answers_map, bubble_grid, abnormal, total
+
+    def _do_recognize(self, cached, images, request):
+        """真实识别流程：按页码逐页识别后合并（多页答题卡修复，HTTP / MQ 共用）。
+
+        cached: CachedTemplate 实例
+        返回 (answers, abnormal)。answers 是 list of dict，字段与 Java 端
+        OmrResult.QuestionAnswer 对齐（不新增字段，避免反序列化问题）。
+        """
+        answers_map, _bubble_grid, abnormal, _total = self.recognize_pages(cached, images)
 
         # answers: {q: {answer, status, correct}} -> list[dict]
         answers = []
-        abnormal = result.card_flag in ("abnormal", "suspicious_blank")
-        for q, info in result.answers.items():
+        for q, info in answers_map.items():
             answers.append({
                 "question_no": q,
                 "selected": [info["answer"]] if info.get("answer") else [],

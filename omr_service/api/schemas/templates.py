@@ -59,7 +59,13 @@ class AnswerEntry(BaseModel):
 
 
 class BubbleGrid(BaseModel):
-    """气泡坐标（前端预览）"""
+    """气泡坐标（前端预览）
+
+    service 返回的键为 snake_case 的 page_index，需开启 populate_by_name 才能按字段名
+    取值（否则会因 alias="pageIndex" 而回退默认值 0，多页气泡页码全部丢失）。
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
     q: int
     opt: str
     x: int

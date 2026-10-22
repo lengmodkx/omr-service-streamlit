@@ -156,12 +156,26 @@ class BatchJobHandler:
             }
 
         try:
-            from omr_service.engine.recognizer import RecognizeContext
-            from omr_service.engine.recognizers import StandardTemplateRecognizer
+            if self.service is None:
+                return {
+                    "scan_image_url": image_url,
+                    "code": 99,
+                    "message": "service 未初始化，无法识别",
+                    "answers": [],
+                }
 
-            recognizer = StandardTemplateRecognizer(standard_template=cached.standard_template)
-            ctx = RecognizeContext()
-            result = recognizer.recognize(images[0], ctx)
+            # 多页答题卡：按页码逐页识别并按整卷绝对题号合并（与 HTTP /v1/recognize 共用同一实现）。
+            # 不能只识别 images[0]：模板缓存里的气泡是整卷合并结果，只采样第一页会答串。
+            rec_t0 = time.monotonic()
+            answers_map, _bubble_grid, abnormal, total = self.service.recognize_pages(cached, images)
+
+            # 与原有 result 语义保持一致：empty 按 status=="empty"，multi 按 status=="multi"
+            empty_count = sum(
+                1 for info in answers_map.values() if info.get("status") == "empty"
+            )
+            multi_count = sum(
+                1 for info in answers_map.values() if info.get("status") == "multi"
+            )
 
             personal_info: List[Dict[str, Any]] = []
             if cached.personal_info:
@@ -198,13 +212,14 @@ class BatchJobHandler:
                         "status": info.get("status", "empty"),
                         "correct": info.get("correct") or False,
                     }
-                    for q, info in result.answers.items()
+                    for q, info in answers_map.items()
                 ],
-                "total": result.total,
-                "empty_count": result.empty_count,
-                "multi_count": result.multi_count,
-                "card_flag": result.card_flag or "",
-                "duration_ms": int(result.duration_ms),
+                "total": total,
+                "empty_count": empty_count,
+                "multi_count": multi_count,
+                # 卡片级异常统一映射为 "abnormal"（无异常为空串，与原协议一致）
+                "card_flag": "abnormal" if abnormal else "",
+                "duration_ms": int((time.monotonic() - rec_t0) * 1000),
                 "personal_info": personal_info,
                 "subjective_crops": subjective_crops,
             }
@@ -460,6 +475,8 @@ class BatchJobHandler:
             return {"code": 99, "message": "service 未初始化，无法解析黄金模板"}
 
         merged_answers: Dict[str, str] = {}
+        # 题号 -> 首次出现页码：用于检测跨页/页内重复题号（题号必须整卷唯一）
+        answer_page: Dict[str, int] = {}
         merged_bubbles: List[Dict[str, Any]] = []
         merged_personal_info: List[Dict[str, Any]] = []
         merged_subjective_crops: List[Dict[str, Any]] = []
@@ -467,7 +484,11 @@ class BatchJobHandler:
         page_errors: List[str] = []
 
         for page in pages:
-            page_index = page.get("page_index", page.get("pageIndex", 0))
+            page_index = _as_int(
+                page.get("page_index")
+                if page.get("page_index") is not None
+                else page.get("pageIndex")
+            )
             request = self._build_parse_request(template_id, page)
             try:
                 resp_dict = self.service.parse_golden_template(request)
@@ -490,16 +511,51 @@ class BatchJobHandler:
                 continue
 
             page_answers = resp_dict.get("answers", []) or []
-            # 新 OmrService 返回 list；旧协议可能返回 dict。统一合并为 dict。
+            # 新 OmrService 返回 list；旧协议可能返回 dict。统一归一化为 [(题号, 答案)]。
             if isinstance(page_answers, dict):
-                merged_answers.update(page_answers)
+                answer_items: List[Tuple[str, str]] = [
+                    (str(q), "" if ans is None else str(ans))
+                    for q, ans in page_answers.items()
+                ]
             else:
+                answer_items = []
                 for ans in page_answers:
-                    q_no = ans.get("question_no") if isinstance(ans, dict) else None
+                    if not isinstance(ans, dict):
+                        continue
+                    q_no = ans.get("question_no")
                     if q_no is None:
                         continue
-                    selected = ans.get("selected", []) if isinstance(ans, dict) else []
-                    merged_answers[str(q_no)] = ",".join(selected) if selected else ""
+                    selected = ans.get("selected", []) or []
+                    answer_items.append(
+                        (str(q_no), ",".join(selected) if selected else "")
+                    )
+
+            # 题号必须整卷唯一：同一页内重复或跨页重复都直接报错，绝不静默覆盖
+            # （否则后页同题号会覆盖前页，导致客观题答案错分）
+            page_seen: set = set()
+            for q_key, _ans_val in answer_items:
+                if q_key in page_seen:
+                    return {
+                        "code": 99,
+                        "message": (
+                            f"第{page_index + 1}页存在重复题号 Q{q_key}；"
+                            "题号必须整卷唯一（可跨页连续编号），请修改框题后重新识别"
+                        ),
+                    }
+                page_seen.add(q_key)
+                prev_page = answer_page.get(q_key)
+                if prev_page is not None:
+                    return {
+                        "code": 99,
+                        "message": (
+                            f"第{prev_page + 1}页与第{page_index + 1}页存在重复题号 Q{q_key}；"
+                            "题号必须整卷唯一（可跨页连续编号），请修改框题后重新识别"
+                        ),
+                    }
+                answer_page[q_key] = page_index
+
+            for q_key, answer_val in answer_items:
+                merged_answers[q_key] = answer_val
             bubble_grid = resp_dict.get("bubble_grid") or []
             for b in bubble_grid:
                 merged_bubbles.append(b)

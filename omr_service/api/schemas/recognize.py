@@ -22,13 +22,18 @@ class AnswerInfo(BaseModel):
 
 
 class BubblePoint(BaseModel):
-    """气泡坐标（前端可视化用）"""
+    """气泡坐标（前端可视化用）
+
+    多页模板的 bubble_grid 按页合并，必须带 page_index 才能区分页面；
+    否则 FastAPI 序列化会丢弃该字段（Java 端 OmrResult.bubbleGrid 为 List<Object>，可安全扩展）。
+    """
     q: int
     opt: str
     x: int
     y: int
     w: int
     h: int
+    page_index: int = 0
 
 
 class PersonalInfoEntry(BaseModel):
