@@ -53,6 +53,30 @@ def test_parse_template_200_empty_columns(app):
     assert r.json()["code"] == 0
 
 
+def test_parse_template_bubble_grid_emits_snake_case_page_index(app):
+    """响应气泡必须输出 snake_case 的 page_index（Java 端按该键读取，alias 会变成 pageIndex）。"""
+    _, service = app
+    service.parse_golden_template.return_value = {
+        "code": 0, "message": "ok", "template_id": 1,
+        "answers": [],
+        "bubble_grid": [
+            {"q": 1, "opt": "A", "x": 1, "y": 2, "w": 3, "h": 4, "page_index": 1}
+        ],
+        "elapsed_ms": 10,
+    }
+    c = TestClient(app[0])
+    r = c.post("/v1/templates/parse", json={
+        "template_id": "t-1",
+        "template_image_url": "http://x/tpl.jpg",
+        "columns": [],
+    })
+
+    assert r.status_code == 200
+    bubble = r.json()["bubble_grid"][0]
+    assert bubble["page_index"] == 1
+    assert "pageIndex" not in bubble
+
+
 def test_verify_recognition_rate_500(app):
     _, service = app
     service.verify_recognition_rate.side_effect = InternalError("verify_recognition_rate 暂未通过 HTTP 暴露")

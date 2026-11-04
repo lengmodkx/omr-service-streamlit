@@ -658,7 +658,9 @@ class OmrService:
                 answers_map[q] = info
 
             bubble_grid.extend(self._bubble_entry(b, page) for b in page_bubbles)
-            if result.card_flag in ("abnormal", "suspicious_blank"):
+            # invalid_image（空图/退化小图）也必须计为卡片级异常：
+            # 该页不会贡献任何答案，若仍返回"正常"会让缺题被当成识别成功的干净结果。
+            if result.card_flag in ("abnormal", "suspicious_blank", "invalid_image"):
                 abnormal = True
             total += _as_int(getattr(result, "total", 0))
 
@@ -736,10 +738,13 @@ class OmrService:
                      len(answers),
                      sum(1 for a in answers if a["status"] == "filled"))
         # bubbles: 带坐标信息的气泡列表
+        # page_index 必须透传：模板解析响应与识别响应共用同一气泡结构，
+        # 缺省回退 0 会让多页模板解析结果丢失页码（Java 端按 page_index 按页渲染）。
         bubble_grid = [
             {
                 "q": b["q"], "opt": b["opt"],
                 "x": b["x"], "y": b["y"], "w": b["w"], "h": b["h"],
+                "page_index": _as_int(b.get("page_index", 0)),
             }
             for b in st.bubbles
         ]

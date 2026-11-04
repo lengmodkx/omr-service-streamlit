@@ -55,8 +55,8 @@ def _fake_service_by_page(mapping):
     return service
 
 
-def test_duplicate_question_across_pages_returns_code_99(monkeypatch):
-    """第 1 页与第 2 页返回同一题号 → code=99，消息含 "重复题号" 和页码。"""
+def test_duplicate_question_across_pages_returns_code_6(monkeypatch):
+    """第 1 页与第 2 页返回同一题号 → code=6（永久性错误，立即失败不重试）。"""
     handler = _make_handler()
     monkeypatch.setattr(
         handler,
@@ -66,14 +66,14 @@ def test_duplicate_question_across_pages_returns_code_99(monkeypatch):
 
     result = handler._do_parse_golden_template(_job())
 
-    assert result["code"] == 99
+    assert result["code"] == 6
     assert "重复题号" in result["message"]
     assert "第1页与第2页" in result["message"]
     assert "Q1" in result["message"]
 
 
-def test_duplicate_question_within_page_returns_code_99(monkeypatch):
-    """同一页内返回重复题号 → 同样 code=99（不允许静默覆盖）。"""
+def test_duplicate_question_within_page_returns_code_6(monkeypatch):
+    """同一页内返回重复题号 → 同样 code=6（不允许静默覆盖，且不应进入重试）。"""
     handler = _make_handler()
     monkeypatch.setattr(
         handler,
@@ -83,7 +83,7 @@ def test_duplicate_question_within_page_returns_code_99(monkeypatch):
 
     result = handler._do_parse_golden_template(_job())
 
-    assert result["code"] == 99
+    assert result["code"] == 6
     assert "重复题号" in result["message"]
     assert "第1页" in result["message"]
 

@@ -166,6 +166,25 @@ class BatchJobHandler:
 
             # 多页答题卡：按页码逐页识别并按整卷绝对题号合并（与 HTTP /v1/recognize 共用同一实现）。
             # 不能只识别 images[0]：模板缓存里的气泡是整卷合并结果，只采样第一页会答串。
+            # load_multi 会静默丢弃下载失败的页并压缩列表，而 recognize_pages 依赖
+            # images[i] ↔ 页码升序位置对应；页数不一致时后页会被错配到前页版面、
+            # 中间页会被静默跳过，产出"成功但错答"的结果。这里显式校验页数，
+            # 按可重试错误（code 99）返回，让消费端重试下载。
+            expected_pages = len(getattr(cached, "page_images", None) or {})
+            if expected_pages and len(images) != expected_pages:
+                logger.error(
+                    "[mq] 答题卡页数与模板页数不一致: url=%s images=%d template=%d",
+                    image_url, len(images), expected_pages,
+                )
+                return {
+                    "scan_image_url": image_url,
+                    "code": 99,
+                    "message": (
+                        f"答题卡图片页数({len(images)})与模板页数({expected_pages})不一致，"
+                        "可能存在页面下载失败，请重试"
+                    ),
+                    "answers": [],
+                }
             rec_t0 = time.monotonic()
             answers_map, _bubble_grid, abnormal, total = self.service.recognize_pages(cached, images)
 
@@ -535,8 +554,10 @@ class BatchJobHandler:
             page_seen: set = set()
             for q_key, _ans_val in answer_items:
                 if q_key in page_seen:
+                    # 重复题号是模板配置错误（用户改框题即可修复），按永久性错误 code 6 立即失败，
+                    # 避免被当成可重试错误反复重下载、重解析所有页（与 recognize_pages 的判定一致）。
                     return {
-                        "code": 99,
+                        "code": 6,
                         "message": (
                             f"第{page_index + 1}页存在重复题号 Q{q_key}；"
                             "题号必须整卷唯一（可跨页连续编号），请修改框题后重新识别"
@@ -546,7 +567,7 @@ class BatchJobHandler:
                 prev_page = answer_page.get(q_key)
                 if prev_page is not None:
                     return {
-                        "code": 99,
+                        "code": 6,
                         "message": (
                             f"第{prev_page + 1}页与第{page_index + 1}页存在重复题号 Q{q_key}；"
                             "题号必须整卷唯一（可跨页连续编号），请修改框题后重新识别"

@@ -102,7 +102,11 @@ def _start_consumer(settings: OmrSettings, service: OmrService, template_store=N
 
 
 def _start_crop_cleaner(settings: OmrSettings):
-    """启动每日 03:30 的本地裁图清理守护线程。"""
+    """启动每日 03:30 的本地裁图清理守护线程。
+
+    返回 (stop_event, thread)：shutdown 时既可通知线程退出，也可 join 等待
+    当前清理轮次收尾（daemon 线程不 join 时进程退出会直接中断删除过程）。
+    """
     if settings.crop_retention_days <= 0:
         logger.info("本地裁图清理已停用，保留期配置为 %s 天", settings.crop_retention_days)
         return None
@@ -124,7 +128,7 @@ def _start_crop_cleaner(settings: OmrSettings):
     thread = threading.Thread(target=run, name="omr-crop-cleaner", daemon=True)
     thread.start()
     logger.info("本地裁图清理线程已启动：保留 %s 天，每日 03:30 执行", settings.crop_retention_days)
-    return stop_event
+    return stop_event, thread
 
 
 def _start_nacos(settings: OmrSettings) -> None:
@@ -172,7 +176,11 @@ def main() -> None:
         logger.info("Shutting down OMR service")
         _deregister_nacos()
         if crop_cleaner_ref[0] is not None:
-            crop_cleaner_ref[0].set()
+            # 先通知清理线程退出，再 join 等当前清理轮次收尾（最多 30s），
+            # 避免进程退出时正在删除的轮次被硬中断。
+            stop_event, cleaner_thread = crop_cleaner_ref[0]
+            stop_event.set()
+            cleaner_thread.join(timeout=30)
         if consumer_ref[0] is not None:
             try:
                 consumer_ref[0].stop()

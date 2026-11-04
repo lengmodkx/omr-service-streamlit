@@ -61,18 +61,17 @@ class AnswerEntry(BaseModel):
 class BubbleGrid(BaseModel):
     """气泡坐标（前端预览）
 
-    service 返回的键为 snake_case 的 page_index，需开启 populate_by_name 才能按字段名
-    取值（否则会因 alias="pageIndex" 而回退默认值 0，多页气泡页码全部丢失）。
+    对外输出统一使用 snake_case 的 page_index（与 recognize.py 的 BubblePoint 一致，
+    Java 端 OmrHttpClient 也是按 page_index 读取），避免响应经 alias 序列化成
+    pageIndex 后前端/Java 取不到页码、多页气泡页码全部丢失。
     """
-    model_config = ConfigDict(populate_by_name=True)
-
     q: int
     opt: str
     x: int
     y: int
     w: int
     h: int
-    page_index: int | None = Field(default=0, alias="pageIndex")
+    page_index: int = 0
 
 
 class PersonalInfoEntry(BaseModel):

@@ -426,3 +426,18 @@ def test_parse_golden_template_caches_real_page_index(service, mock_deps):
     # 主观题区域 camelCase 已归一化
     assert cached.subjective_regions[0]["page_index"] == 1
     assert cached.subjective_regions[0]["stitch_with_next"] is False
+
+
+def test_do_parse_bubbles_carry_page_index(service):
+    """模板解析输出的气泡必须透传列配置的 page_index（否则多页解析页码全为 0）。"""
+    img = np.zeros((200, 100, 3), dtype=np.uint8)
+    columns = [{
+        "x1": 0, "y1": 0, "x2": 100, "y2": 200,
+        "start_q": 1, "num_q": 2, "num_options": 4,
+        "option_axis": "x", "reverse_q": False, "page_index": 1,
+    }]
+
+    _answers, bubble_grid = service._do_parse(img, columns)
+
+    assert bubble_grid, "应当生成气泡坐标"
+    assert {b["page_index"] for b in bubble_grid} == {1}

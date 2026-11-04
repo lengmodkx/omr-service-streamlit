@@ -212,3 +212,37 @@ def test_recognize_returns_multipage_answers_and_bubble_grid(fake_recognize):
     assert set(result["answers"][0]) == {
         "question_no", "selected", "status", "is_blank", "is_multiple", "correct",
     }
+
+
+def test_recognize_pages_treats_invalid_image_as_abnormal(monkeypatch):
+    """invalid_image（空图/退化小图）页面必须计入 abnormal。
+
+    该页不贡献任何答案，若仍按"正常"返回，消费端会把缺题当成识别成功的干净卡片。
+    """
+    from omr_service.engine.recognizer import RecognizeResult
+    from omr_service.engine.recognizers.standard import StandardTemplateRecognizer
+
+    def _fake_recognize(self, image, ctx):
+        return RecognizeResult(
+            answers={}, total=0, empty_count=0, multi_count=0,
+            card_flag="invalid_image",
+        )
+
+    monkeypatch.setattr(StandardTemplateRecognizer, "recognize", _fake_recognize)
+
+    service = _make_service()
+    template = _standard_template([_column(0, 1)])
+    cached = CachedTemplate(
+        standard_template=template,
+        page_images={0: _image(0)},
+    )
+
+    answers_map, bubble_grid, abnormal, total = service.recognize_pages(
+        cached, [_image(10)]
+    )
+
+    assert answers_map == {}
+    assert total == 0
+    assert abnormal is True
+    # 气泡坐标仍按页返回，前端可继续渲染
+    assert [b["page_index"] for b in bubble_grid] == [0] * 8
