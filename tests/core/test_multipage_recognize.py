@@ -92,7 +92,7 @@ def test_recognize_pages_samples_each_page_with_own_template(fake_recognize):
     cached = CachedTemplate(standard_template=template, page_images=golden)
 
     scan0, scan1 = _image(10), _image(20)
-    answers_map, bubble_grid, abnormal, total = service.recognize_pages(
+    answers_map, bubble_grid, card_flag, total = service.recognize_pages(
         cached, [scan0, scan1]
     )
 
@@ -120,7 +120,7 @@ def test_recognize_pages_samples_each_page_with_own_template(fake_recognize):
     assert answers_map[1] == {"answer": "A", "status": "single", "correct": None}
     assert answers_map[4] == {"answer": "A", "status": "single", "correct": None}
     assert total == 4
-    assert abnormal is False
+    assert card_flag == ""
 
     # bubble_grid 合并两页气泡并保留 page_index（每页 2 题 × 4 选项 = 8 个气泡）
     assert [b["page_index"] for b in bubble_grid] == [0] * 8 + [1] * 8
@@ -167,7 +167,7 @@ def test_recognize_pages_skips_page_without_bubbles(fake_recognize, caplog):
     )
 
     with caplog.at_level(logging.WARNING, logger="omr_service.core.service"):
-        answers_map, bubble_grid, abnormal, total = service.recognize_pages(
+        answers_map, bubble_grid, card_flag, total = service.recognize_pages(
             cached, [_image(10), _image(20)]
         )
 
@@ -215,7 +215,7 @@ def test_recognize_returns_multipage_answers_and_bubble_grid(fake_recognize):
 
 
 def test_recognize_pages_treats_invalid_image_as_abnormal(monkeypatch):
-    """invalid_image（空图/退化小图）页面必须计入 abnormal。
+    """invalid_image（空图/退化小图）页面必须回传细粒度 card_flag，不能报成干净结果。
 
     该页不贡献任何答案，若仍按"正常"返回，消费端会把缺题当成识别成功的干净卡片。
     """
@@ -237,12 +237,12 @@ def test_recognize_pages_treats_invalid_image_as_abnormal(monkeypatch):
         page_images={0: _image(0)},
     )
 
-    answers_map, bubble_grid, abnormal, total = service.recognize_pages(
+    answers_map, bubble_grid, card_flag, total = service.recognize_pages(
         cached, [_image(10)]
     )
 
     assert answers_map == {}
     assert total == 0
-    assert abnormal is True
+    assert card_flag == "invalid_image"
     # 气泡坐标仍按页返回，前端可继续渲染
     assert [b["page_index"] for b in bubble_grid] == [0] * 8

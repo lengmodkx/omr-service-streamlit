@@ -49,7 +49,7 @@ def test_recognize_one_reuses_multipage_recognition():
             3: {"answer": "BC", "status": "multi", "correct": False},
         },
         [{"q": 1, "opt": "A", "x": 0, "y": 0, "w": 1, "h": 1, "page_index": 0}],
-        True,
+        "abnormal",
         3,
     )
 
@@ -64,7 +64,7 @@ def test_recognize_one_reuses_multipage_recognition():
     assert data["total"] == 3
     assert data["empty_count"] == 1
     assert data["multi_count"] == 1
-    # abnormal=True 映射为 card_flag="abnormal"
+    # card_flag 原样透传（保留 abnormal / suspicious_blank / invalid_image 细粒度）
     assert data["card_flag"] == "abnormal"
 
 
@@ -79,7 +79,7 @@ def test_recognize_one_returns_empty_card_flag_without_abnormal():
     service.recognize_pages.return_value = (
         {1: {"answer": "A", "status": "single", "correct": True}},
         [],
-        False,
+        "",
         1,
     )
 
@@ -90,6 +90,25 @@ def test_recognize_one_returns_empty_card_flag_without_abnormal():
     assert data["total"] == 1
     assert data["empty_count"] == 0
     assert data["multi_count"] == 0
+
+
+def test_recognize_one_duplicate_questions_returns_permanent_error():
+    """重复题号是模板配置错误：recognize_pages 抛 InvalidRequestError → code 6（不重试）。"""
+    from omr_service.core.exceptions import InvalidRequestError
+
+    images = [_image(10)]
+    cached = CachedTemplate(
+        standard_template=MagicMock(),
+        personal_info=[],
+        subjective_regions=[],
+    )
+    handler, service = _make_handler(cached, images)
+    service.recognize_pages.side_effect = InvalidRequestError("模板题号跨页重复：Q1")
+
+    data = handler._recognize_one(1, "http://x/page0.jpg")
+
+    assert data["code"] == 6
+    assert "重复" in data["message"]
 
 
 def test_recognize_one_page_count_mismatch_returns_retryable_error():
@@ -110,7 +129,7 @@ def test_recognize_one_page_count_mismatch_returns_retryable_error():
 
     data = handler._recognize_one(1, "http://x/page0.jpg,http://x/page1.jpg")
 
-    # code 99 走消费端重试路径（4/5 才是永久性错误）
+    # code 99 走消费端重试路径（4/5/6 才是永久性错误）
     assert data["code"] == 99
     assert "页数" in data["message"]
     service.recognize_pages.assert_not_called()

@@ -1,4 +1,4 @@
-﻿"""OMR 业务核心: 协议无关, 输入输出都是 plain dict.
+"""OMR 业务核心: 协议无关, 输入输出都是 plain dict.
 
 本模块不依赖 FastAPI / Pydantic / protobuf.
 
@@ -593,8 +593,8 @@ class OmrService:
         )
         return page_template
 
-    def recognize_pages(self, cached, images) -> tuple[dict, list, bool, int]:
-        """按 page_index 逐页识别并合并；返回 (answers_map, bubble_grid, abnormal, total)。
+    def recognize_pages(self, cached, images) -> tuple[dict, list, str, int]:
+        """按 page_index 逐页识别并合并；返回 (answers_map, bubble_grid, card_flag, total)。
 
         背景：引擎题号是整卷绝对题号（standard_template.py: qn = start_q + qi），
         page_index 只挂在气泡上；模板缓存把多页气泡合并进同一个 standard_template，
@@ -605,7 +605,8 @@ class OmrService:
         返回：
         - answers_map: {题号: {"answer": str|None, "status": str, "correct": bool|None}}
         - bubble_grid: 各页气泡坐标合并结果（保留 page_index）
-        - abnormal: 是否任一页出现卡片级异常
+        - card_flag: 卡片级异常标记（多页取最强：invalid_image > abnormal > suspicious_blank），
+          无异常为空串；保留细粒度标记供 MQ 结果原样透传给 Java 端
         - total: 各页识别题目数之和
 
         跨页同题号视为模板配置错误，直接抛 InvalidRequestError，绝不静默覆盖。
@@ -616,7 +617,7 @@ class OmrService:
         template = getattr(cached, "standard_template", None)
         if template is None or not hasattr(template, "recognize"):
             logger.error("CachedTemplate 中无 StandardTemplate: %s", type(cached))
-            return {}, [], False, 0
+            return {}, [], "", 0
 
         page_images = getattr(cached, "page_images", None) or {}
         # 页码顺序：以缓存中的页码升序为准；无页码缓存时按图片顺序（兼容单页模板）
@@ -627,7 +628,7 @@ class OmrService:
         bubble_grid: List[Dict[str, Any]] = []
         question_page: Dict[Any, int] = {}
         duplicate_questions: List[Any] = []
-        abnormal = False
+        page_flags: List[str] = []
         total = 0
 
         image_list = images if isinstance(images, (list, tuple)) else [images]
@@ -658,10 +659,10 @@ class OmrService:
                 answers_map[q] = info
 
             bubble_grid.extend(self._bubble_entry(b, page) for b in page_bubbles)
-            # invalid_image（空图/退化小图）也必须计为卡片级异常：
-            # 该页不会贡献任何答案，若仍返回"正常"会让缺题被当成识别成功的干净结果。
-            if result.card_flag in ("abnormal", "suspicious_blank", "invalid_image"):
-                abnormal = True
+            # 卡片级标记逐页收集：invalid_image（空图/退化小图）该页不贡献任何答案，
+            # 若仍按"正常"返回会让缺题被当成识别成功的干净结果
+            if result.card_flag:
+                page_flags.append(str(result.card_flag))
             total += _as_int(getattr(result, "total", 0))
 
         if duplicate_questions:
@@ -671,11 +672,18 @@ class OmrService:
                 f"模板题号跨页重复：{labels}，请把题号改为整卷唯一后重新解析模板"
             )
 
+        # 多页取最强标记（invalid_image > abnormal > suspicious_blank），保留细粒度供下游区分
+        card_flag = ""
+        for candidate in ("invalid_image", "abnormal", "suspicious_blank"):
+            if candidate in page_flags:
+                card_flag = candidate
+                break
+
         logger.info(
-            "多页识别完成: pages=%d questions=%d abnormal=%s",
-            len(image_list), len(answers_map), abnormal,
+            "多页识别完成: pages=%d questions=%d card_flag=%s",
+            len(image_list), len(answers_map), card_flag or "-",
         )
-        return answers_map, bubble_grid, abnormal, total
+        return answers_map, bubble_grid, card_flag, total
 
     def _do_recognize(self, cached, images, request):
         """真实识别流程：按页码逐页识别后合并（多页答题卡修复，HTTP / MQ 共用）。
@@ -683,8 +691,10 @@ class OmrService:
         cached: CachedTemplate 实例
         返回 (answers, abnormal)。answers 是 list of dict，字段与 Java 端
         OmrResult.QuestionAnswer 对齐（不新增字段，避免反序列化问题）。
+        abnormal 由各页 card_flag 汇总（任一页异常即为 True）。
         """
-        answers_map, _bubble_grid, abnormal, _total = self.recognize_pages(cached, images)
+        answers_map, _bubble_grid, card_flag, _total = self.recognize_pages(cached, images)
+        abnormal = bool(card_flag)
 
         # answers: {q: {answer, status, correct}} -> list[dict]
         answers = []

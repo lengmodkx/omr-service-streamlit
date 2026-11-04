@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from omr_service.config import OmrConfig
-from omr_service.core.exceptions import ImageLoadError
+from omr_service.core.exceptions import ImageLoadError, InvalidRequestError
 from omr_service.core.service import OmrService, run_with_timeout
 from omr_service.engine.cropper import SubjectiveCropper
 from omr_service.engine.ocr import (
@@ -186,7 +186,18 @@ class BatchJobHandler:
                     "answers": [],
                 }
             rec_t0 = time.monotonic()
-            answers_map, _bubble_grid, abnormal, total = self.service.recognize_pages(cached, images)
+            try:
+                answers_map, _bubble_grid, card_flag, total = self.service.recognize_pages(cached, images)
+            except InvalidRequestError as exc:
+                # 重复题号等永久性模板配置错误：按 code 6 立即失败，不进入重试
+                # （否则每次都重新下载全部图片、整卷重识别，重试 max_retry 次后才失败）
+                logger.error("[mq] 识别请求无效（永久性）: url=%s err=%s", image_url, exc)
+                return {
+                    "scan_image_url": image_url,
+                    "code": 6,
+                    "message": str(exc),
+                    "answers": [],
+                }
 
             # 与原有 result 语义保持一致：empty 按 status=="empty"，multi 按 status=="multi"
             empty_count = sum(
@@ -236,8 +247,9 @@ class BatchJobHandler:
                 "total": total,
                 "empty_count": empty_count,
                 "multi_count": multi_count,
-                # 卡片级异常统一映射为 "abnormal"（无异常为空串，与原协议一致）
-                "card_flag": "abnormal" if abnormal else "",
+                # 卡片级异常原样透传细粒度标记（invalid_image / abnormal / suspicious_blank / ""），
+                # 与 docs/OMR服务接口文档.md 的枚举一致；下游可据此区分"疑似空白卷"与"无效图像"
+                "card_flag": card_flag or "",
                 "duration_ms": int((time.monotonic() - rec_t0) * 1000),
                 "personal_info": personal_info,
                 "subjective_crops": subjective_crops,
@@ -389,8 +401,8 @@ class BatchJobHandler:
                 logger.info("[mq] 任务成功 task_id=%s", task_id)
                 return {"success": True, "task_id": task_id, "retrying": False}
 
-            # 永久性错误（模板不存在、图片加载失败）直接失败，不再重试
-            if code in (4, 5):
+            # 永久性错误（模板不存在、图片加载失败、模板配置无效）直接失败，不再重试
+            if code in (4, 5, 6):
                 logger.warning(
                     "[mq] 任务遇到永久性错误，直接失败 task_id=%s code=%s message=%s",
                     task_id, code, data.get("message", ""),
