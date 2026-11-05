@@ -41,6 +41,8 @@ String url = "http://omr-service:8080/v1/recognize";
 | POST | `/v1/templates/parse` | 同步解析黄金模板 |
 | POST | `/v1/verify_recognition_rate` | 暂返 `501 Not Implemented` |
 | POST | `/v1/reverify_paper` | 与 `recognize` 行为等价的复验接口 |
+| POST | `/v1/ocr/handwriting` | 手写文字 OCR（供 AI 判卷 Java 端调用） |
+| POST | `/v1/ocr/formula` | 公式 OCR（一期仅文本，`latex` 恒为 null） |
 | POST | `/v1/tasks` | 异步任务投递（`202 Accepted`） |
 | GET  | `/v1/tasks/{task_id}` | 异步任务状态查询 |
 | GET  | `/v1/health` | 存活探针 |
@@ -229,6 +231,66 @@ String url = "http://omr-service:8080/v1/recognize";
 
 返回静态裁剪图文件（image/png 等），由 `OMR_CROP_OUTPUT_DIR` 指定的本地目录提供。
 
+### 3.8 `POST /v1/ocr/handwriting` / `POST /v1/ocr/formula`（通用 OCR）
+
+供 AI 判卷 Java 端调用：整图 OCR，返回行级文本与置信度。复用 OMR 服务现有
+PaddleOCR 引擎与预处理（灰度 + CLAHE + 去噪），不做姓名清洗、条码解码等
+答题卡专用后处理。
+
+请求 `OcrRequest`：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `image_url` | string | 二选一 | 图片 URL（http/https 或本地路径）；下载复用现有图片加载器安全限制（30s 超时、50MB 上限、3 次重试） |
+| `image_base64` | string | 二选一 | 图片 base64（可选 data URI 前缀，如 `data:image/png;base64,...`） |
+
+> `image_url` 与 `image_base64` 必须且只能提供其一；两者都缺或都传返回 `400`（code 6）。
+
+响应 `OcrResponse`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `text` | string | 整图识别文本（按行拼接，换行分隔） |
+| `lines` | OcrLine[] | 行级识别结果 |
+| `engine` | string | 引擎标识，恒为 `paddle` |
+| `latex` | string\|null | LaTeX 结果；**公式 OCR 一期没有专用公式模型，恒为 `null`（一期仅文本）** |
+
+`OcrLine`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `text` | string | 行文本 |
+| `confidence` | float | 行置信度 `0.0 ~ 1.0` |
+
+响应示例：
+
+```json
+{
+  "text": "手写答案一\n第二行文本",
+  "lines": [
+    {"text": "手写答案一", "confidence": 0.98},
+    {"text": "第二行文本", "confidence": 0.90}
+  ],
+  "engine": "paddle",
+  "latex": null
+}
+```
+
+异常与空结果约定（保证不抛 `500`）：
+
+| 场景 | 返回 |
+|------|------|
+| `image_url` / `image_base64` 都缺或都传 | `400`，code 6 |
+| base64 解码失败 / 内容为空 / 无法解码为图片 | `400`，code 6 |
+| URL 下载失败 / 超时 / 超过大小限制 | `502`，code 5 |
+| 识别为空（空白图）/ 引擎不可用 / 推理超时 / 推理异常 | `200`，`text=""`、`lines=[]` |
+
+两个路由说明：
+
+- `/v1/ocr/handwriting`：手写文字识别，直接返回 PaddleOCR 文本结果。
+- `/v1/ocr/formula`：**公式 OCR 一期没有专用公式模型，仅返回 PaddleOCR 文本结果**，
+  `latex` 字段恒为 `null`；后续接入专用公式模型后由该字段返回 LaTeX。
+
 ## 4. 错误码
 
 业务层 `code` 字段：
@@ -281,6 +343,16 @@ curl -X POST http://localhost:8080/v1/recognize \
 
 # 3. 健康检查
 curl http://localhost:8080/v1/health
+
+# 4. 手写文字 OCR（URL 来源）
+curl -X POST http://localhost:8080/v1/ocr/handwriting \
+  -H "Content-Type: application/json" \
+  -d '{"image_url": "https://oss/handwriting.jpg"}'
+
+# 5. 公式 OCR（base64 来源；一期仅文本，latex 恒为 null）
+curl -X POST http://localhost:8080/v1/ocr/formula \
+  -H "Content-Type: application/json" \
+  -d '{"image_base64": "iVBORw0KGgo..."}'
 ```
 
 ### 5.2 Python（requests）

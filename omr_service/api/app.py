@@ -13,6 +13,7 @@ from omr_service.api.errors import register_error_handlers
 from omr_service.api.routers import (
     crops,
     health,
+    ocr,
     recognize,
     tasks,
     templates,
@@ -70,5 +71,6 @@ def create_app(
     app.include_router(templates.router)
     app.include_router(tasks.router)
     app.include_router(crops.router)
+    app.include_router(ocr.router)
 
     return app

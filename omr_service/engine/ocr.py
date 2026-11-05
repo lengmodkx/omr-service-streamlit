@@ -664,6 +664,50 @@ class PersonalInfoOcr:
                 confidences.append(float(conf) if conf is not None else 0.0)
         return texts, confidences
 
+    def recognize_page_lines(self, image: np.ndarray) -> Dict[str, Any]:
+        """整页通用 OCR（对外 /v1/ocr/handwriting、/v1/ocr/formula 路由使用）。
+
+        复用本类 PaddleOCR 引擎（懒加载单例）、串行推理锁与预处理（灰度 + CLAHE + 去噪），
+        不做姓名清洗、条码解码等答题卡专用后处理；引擎不可用/识别为空/推理异常
+        均返回空结果（text 空串、lines 空列表），不抛异常。
+
+        Args:
+            image: 待识别图片（BGR 或灰度）
+
+        Returns:
+            {"text": str, "lines": [{"text": str, "confidence": float}], "engine": "paddle"}
+        """
+        empty: Dict[str, Any] = {"text": "", "lines": [], "engine": "paddle"}
+        engine = self._get_engine()
+        if engine is None:
+            return empty
+        if image is None or image.size == 0:
+            return empty
+        preprocessed = self._preprocess(image)
+        try:
+            # Paddle 推理非线程安全，串行化调用
+            with PersonalInfoOcr._ocr_call_lock:
+                result = engine.ocr(preprocessed, cls=True)
+        except Exception as e:
+            logger.warning("通用 OCR 识别异常: %s", e)
+            return empty
+
+        # PaddleOCR 返回结构：[[[box], (text, confidence)], ...]
+        if not result or not result[0]:
+            return empty
+
+        lines: List[Dict[str, Any]] = []
+        for line in result[0]:
+            if line and len(line) == 2:
+                _, (text, conf) = line
+                if text:
+                    lines.append({
+                        "text": text,
+                        "confidence": round(float(conf) if conf is not None else 0.0, 4),
+                    })
+        full_text = "\n".join(item["text"] for item in lines).strip()
+        return {"text": full_text, "lines": lines, "engine": "paddle"}
+
 
 def recognize_personal_info(
     image: np.ndarray,
@@ -768,3 +812,8 @@ def recognize_personal_info_block(
 ) -> Dict[str, Any]:
     """便捷函数：识别考生信息区整体"""
     return PersonalInfoOcr().recognize_block(image, region)
+
+
+def recognize_page_text(image: np.ndarray) -> Dict[str, Any]:
+    """便捷函数：整页通用 OCR（对外 /v1/ocr/handwriting、/v1/ocr/formula 路由）"""
+    return PersonalInfoOcr().recognize_page_lines(image)
