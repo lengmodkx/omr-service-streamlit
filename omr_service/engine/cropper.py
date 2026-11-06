@@ -35,6 +35,7 @@ class SubjectiveCropper:
         images: List[np.ndarray],
         regions: List[Dict[str, Any]],
         namespace: str,
+        reference_images: Optional[Dict[int, np.ndarray]] = None,
     ) -> List[Dict[str, Any]]:
         """裁剪主观题区域（含跨页拼接）
 
@@ -42,12 +43,17 @@ class SubjectiveCropper:
             images: 多页答题卡图片列表，下标即 page_index
             regions: 主观题区域配置列表，每项包含 q, x1, y1, x2, y2, page_index, stitch_with_next
             namespace: 用于生成目录的唯一标识，如 task_id 或 template_id
+            reference_images: 每页模板参考图 {page_index: image}；模板坐标按参考图尺寸记录，
+                扫描图尺寸不同（手机拍照/高扫 4960x3507 等）时必须按比例缩放，否则裁剪区域错位
 
         Returns:
             裁剪结果列表，每项包含 q, image_url, page_index
         """
         if not regions:
             return []
+
+        # 模板坐标 → 扫描图坐标：按页缩放
+        regions = self._scale_regions(regions, images, reference_images)
 
         # 按题号分组
         groups: Dict[int, List[Dict[str, Any]]] = {}
@@ -75,6 +81,45 @@ class SubjectiveCropper:
                     "page_index": crop_page_index,
                 })
         return results
+
+    @staticmethod
+    def _scale_regions(
+        regions: List[Dict[str, Any]],
+        images: List[np.ndarray],
+        reference_images: Optional[Dict[int, np.ndarray]],
+    ) -> List[Dict[str, Any]]:
+        """把模板坐标缩放到扫描图坐标（模板与扫描图尺寸不一致时）。
+
+        模板坐标以黄金模板图（如 2339x1654）为基准；手机拍照/高扫常见 4960x3507，
+        如果不缩放，主观题会裁到左上角一小块，表现就是“Q22 裁出条码区、Q21 裁出选择题区”。
+        """
+        if not reference_images:
+            return regions
+
+        scaled: List[Dict[str, Any]] = []
+        for region in regions:
+            page = int(region.get("page_index", 0))
+            ref = reference_images.get(page)
+            if ref is None or page >= len(images):
+                scaled.append(dict(region))
+                continue
+            target = images[page]
+            ref_h, ref_w = ref.shape[:2]
+            tgt_h, tgt_w = target.shape[:2]
+            if ref_w <= 0 or ref_h <= 0 or (ref_w == tgt_w and ref_h == tgt_h):
+                scaled.append(dict(region))
+                continue
+            scale_x = tgt_w / ref_w
+            scale_y = tgt_h / ref_h
+            item = dict(region)
+            for key in ("x1", "x2"):
+                if key in item:
+                    item[key] = int(round(float(item[key]) * scale_x))
+            for key in ("y1", "y2"):
+                if key in item:
+                    item[key] = int(round(float(item[key]) * scale_y))
+            scaled.append(item)
+        return scaled
 
     def crop_by_regions(
         self,

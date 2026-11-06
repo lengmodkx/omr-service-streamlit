@@ -223,7 +223,10 @@ class BatchJobHandler:
                 namespace = f"task_{task_id or int(time.time() * 1000)}"
                 subjective_crops = run_with_timeout(
                     lambda: self._cropper.crop_subjective_regions(
-                        images, cached.subjective_regions, namespace=namespace
+                        images,
+                        cached.subjective_regions,
+                        namespace=namespace,
+                        reference_images=cached.page_images,
                     ),
                     self.cfg.ocr_timeout_seconds,
                     "主观题裁剪",

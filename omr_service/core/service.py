@@ -258,7 +258,9 @@ class OmrService:
         if request.get("subjective_regions"):
             regions = normalize_subjective_regions(request["subjective_regions"])
             result["subjective_crops"] = run_with_timeout(
-                lambda: self._crop_subjective(images, regions, f"task_{template_id}"),
+                lambda: self._crop_subjective(
+                    images, regions, f"task_{template_id}", cached.page_images
+                ),
                 self.ocr_timeout_seconds,
                 "主观题裁剪",
                 [],
@@ -266,7 +268,8 @@ class OmrService:
 
         return result
 
-    def _crop_subjective(self, images: list, regions: List[Dict[str, Any]], namespace: str) -> List[Dict[str, Any]]:
+    def _crop_subjective(self, images: list, regions: List[Dict[str, Any]], namespace: str,
+                         reference_images: Optional[Dict[int, Any]] = None) -> List[Dict[str, Any]]:
         """主观题裁剪：单图场景（Java 按页拆请求）把 page_index 归一化为 0 选图，结果还原原始页码.
 
         背景：Java 端按页拆分黄金模板解析/识别请求，每页只传一张图片，但 region 的
@@ -286,7 +289,9 @@ class OmrService:
                 region_copy["page_index"] = 0
             norm_regions.append(region_copy)
 
-        crops = self.cropper.crop_subjective_regions(images, norm_regions, namespace)
+        crops = self.cropper.crop_subjective_regions(
+            images, norm_regions, namespace, reference_images=reference_images
+        )
         if single_image:
             for c in crops:
                 q = _as_int(c.get("q"))
