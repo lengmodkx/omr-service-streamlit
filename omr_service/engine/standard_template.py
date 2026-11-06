@@ -301,9 +301,14 @@ class StandardTemplate:
         # 修复 OMR0002 14A Q9 真实多涂(A=156, C=159)被旧阈值漏判
         # 旧阈值 v<150 让两个 156/159 都被排掉,导致 dark_count=0 落到防线3 误判 single
         dark_count = sum(1 for _, v in sorted_opts if other_mean - v > 24 and v < 170)
-        abs_dark = sum(1 for v in all_vals if v < 160)  # 处理全体偏暗的极端情况
+        # 绝对暗底色只在纸张整体偏暗时兜底；160 会把 150 左右的纸面噪声也算成填涂，
+        # 多选题会被拼成 ABCD。这里收紧到 100。
+        abs_dark = sum(1 for v in all_vals if v < 100)
         # 收集所有填涂的选项(用于多选题显示),与上方检测口径一致
-        dark_opts = sorted([o for o, v in sorted_opts if (other_mean - v > 24 and v < 170) or v < 160])
+        dark_opts = sorted(
+            [o for o, v in sorted_opts
+             if (other_mean - v > 24 and v < 170) or (v < 100 and mean_val < 130)]
+        )
         # 空白信号: ≥2 个其他选项是真正纯白(>=254)时,允许 best 略有差异不判 empty
         # 用于防线1 豁免,避免"大部分选项 248~252,best=240"的浅填涂被误判为空
         strong_white = sum(1 for v in all_vals if v >= 254)
@@ -448,24 +453,28 @@ class StandardTemplate:
             ref_gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY) if len(self.image.shape) == 3 else self.image
             warped = self._homography_align(gray, ref_gray)
             if warped is not None:
+                # 四角定位块单应已经把透视/旋转/缩放全部校正，再叠 ECC 反而会被
+                # 局部文字吸偏（多选题 Q11~Q15 全部采到黑边就是这个原因）。
                 blurred = cv2.GaussianBlur(warped, (5, 5), 0)
-            ref_blur = cv2.GaussianBlur(ref_gray, (5, 5), 0)
-            if blurred.shape != ref_blur.shape:
-                blurred = cv2.resize(blurred, (ref_blur.shape[1], ref_blur.shape[0]))
-            warp_matrix = np.eye(2, 3, dtype=np.float32)
-            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-6)
-            try:
-                _, warp_matrix = cv2.findTransformECC(
-                    ref_blur, blurred, warp_matrix,
-                    cv2.MOTION_EUCLIDEAN, criteria
-                )
-                blurred = cv2.warpAffine(
-                    blurred, warp_matrix, (ref_blur.shape[1], ref_blur.shape[0]),
-                    flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP
-                )
-                h, w = ref_blur.shape
-            except cv2.error:
-                pass  # 对齐失败则使用原始图像
+                h, w = blurred.shape
+            else:
+                ref_blur = cv2.GaussianBlur(ref_gray, (5, 5), 0)
+                if blurred.shape != ref_blur.shape:
+                    blurred = cv2.resize(blurred, (ref_blur.shape[1], ref_blur.shape[0]))
+                warp_matrix = np.eye(2, 3, dtype=np.float32)
+                criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-6)
+                try:
+                    _, warp_matrix = cv2.findTransformECC(
+                        ref_blur, blurred, warp_matrix,
+                        cv2.MOTION_EUCLIDEAN, criteria
+                    )
+                    blurred = cv2.warpAffine(
+                        blurred, warp_matrix, (ref_blur.shape[1], ref_blur.shape[0]),
+                        flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP
+                    )
+                    h, w = ref_blur.shape
+                except cv2.error:
+                    pass  # 对齐失败则使用原始图像
 
         q_groups = {}
         for b in self.bubbles:
