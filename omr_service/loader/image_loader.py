@@ -113,8 +113,28 @@ class ImageLoader:
             return None
 
         arr = np.frombuffer(data, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        return img
+        return self._decode(arr)
+
+    @staticmethod
+    def _decode(arr: np.ndarray) -> Optional[np.ndarray]:
+        """解码图片并应用 EXIF 方向。
+
+        手机拍照（微信图片）常带 EXIF Orientation（6/8），OpenCV 的 imdecode 不读 EXIF，
+        会把 A3 横向答题卡解成竖向，导致模板匹配失败。这里先按 EXIF 摆正，再转 BGR。
+        """
+        try:
+            from PIL import Image, ImageOps
+
+            with Image.open(io.BytesIO(arr.tobytes())) as image:
+                orientation = image.getexif().get(274)
+                if orientation in (2, 3, 4, 5, 6, 7, 8):
+                    image = ImageOps.exif_transpose(image)
+                rgb = np.array(image.convert("RGB"))
+                return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        except Exception as exc:
+            logger.warning("按 EXIF 解码失败，回退 OpenCV 解码: %s", exc)
+
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
     @staticmethod
     def _load_local(path: str) -> Optional[np.ndarray]:
@@ -124,7 +144,7 @@ class ImageLoader:
         if not data:
             return None
         arr = np.frombuffer(data, dtype=np.uint8)
-        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        return ImageLoader._decode(arr)
 
     def close(self):
         self._session.close()
