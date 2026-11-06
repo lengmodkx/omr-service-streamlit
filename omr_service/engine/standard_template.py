@@ -328,7 +328,7 @@ class StandardTemplate:
         # 2026-06-04 调整 gap 阈值 30→40: 覆盖 "C+D 双重填涂但 D 偏深 C 偏浅" 的边界 case
         # (OMR0013 21A Q12:D=110 C=142 gap=32, 旧阈值会漏判多选)
         # abs_dark 仅在整体偏暗时(mean<130)启用,避免正常亮度下误判
-        elif (dark_count >= 2 and gap <= 40) or (abs_dark >= 2 and gap <= 20 and mean_val < 130):
+        elif (dark_count >= 2 and gap <= 40) or (abs_dark >= 2 and mean_val < 130):
             return {"answer": "".join(dark_opts) if dark_opts else best_opt, "status": "multi"}
         # 防线3 统一规则 (2026-06-04 合并原防线3 + 防线3b 分支1):
         # 核心: best_delta > 12 + gap > 5 (相对暗度+集中度,挡住印刷线/扫描噪声)
