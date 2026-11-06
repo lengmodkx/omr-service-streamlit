@@ -340,44 +340,63 @@ class StandardTemplate:
             return {"answer": None, "status": "uncertain"}
 
     @staticmethod
-    def _homography_align(gray: np.ndarray, ref_gray: np.ndarray) -> np.ndarray | None:
-        """用 SIFT/ORB 特征点估计目标卡到模板的单应矩阵并透视校正。
+    def _find_corner_markers(gray: np.ndarray) -> np.ndarray | None:
+        """检测答题卡四角的黑色定位方块，返回 [左上, 右上, 右下, 左下] 中心点。
 
-        手机拍照不是纯平移/旋转，ECC 的欧式变换无法消除透视；
-        先做一次单应对齐，可显著减少选项列整体偏移。
+        定位块是整张卡上面积最大、最靠近四角的实心黑块；比 SIFT 文字特征稳定得多，
+        不会因为题干文字重复而估出退化单应。
+        """
+        h, w = gray.shape[:2]
+        _, binary = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
+        for contour in contours:
+            x, y, cw, ch = cv2.boundingRect(contour)
+            area = cv2.contourArea(contour)
+            if area < 100 or area > 20000:
+                continue
+            if not (0.5 <= cw / max(ch, 1) <= 2.0):
+                continue
+            candidates.append((x + cw / 2, y + ch / 2, area))
+        if len(candidates) < 4:
+            return None
+
+        def nearest(predicate):
+            pool = [c for c in candidates if predicate(c[0], c[1])]
+            if not pool:
+                return None
+            # 取靠近角点且面积较大的候选
+            return max(pool, key=lambda c: c[2])[:2]
+
+        tl = nearest(lambda x, y: x < w * 0.15 and y < h * 0.15)
+        tr = nearest(lambda x, y: x > w * 0.85 and y < h * 0.15)
+        br = nearest(lambda x, y: x > w * 0.85 and y > h * 0.85)
+        bl = nearest(lambda x, y: x < w * 0.15 and y > h * 0.85)
+        if None in (tl, tr, br, bl):
+            return None
+        return np.float32([tl, tr, br, bl])
+
+    @staticmethod
+    def _homography_align(gray: np.ndarray, ref_gray: np.ndarray) -> np.ndarray | None:
+        """用四角黑色定位块估计目标卡到模板的单应矩阵并透视校正。
+
+        手机拍照不是纯平移/旋转，ECC 的欧式变换无法消除透视；四角定位块是印刷的
+        实心黑方块，特征稳定，用它做单应比 SIFT 文字匹配可靠。
         """
         try:
-            # 只用 SIFT：ORB 在大量文字/表格线上容易匹配错，错误单应会把整张卡扭到黑边，
-            # 表现就是所有选项都被采成深色（ABCD）。SIFT 不可用时直接放弃，回退 ECC。
-            if not hasattr(cv2, "SIFT_create"):
+            scan_corners = StandardTemplate._find_corner_markers(gray)
+            ref_corners = StandardTemplate._find_corner_markers(ref_gray)
+            if scan_corners is None or ref_corners is None:
                 return None
-            detector = cv2.SIFT_create()
-            kp1, des1 = detector.detectAndCompute(ref_gray, None)
-            kp2, des2 = detector.detectAndCompute(gray, None)
-            if des1 is None or des2 is None or len(kp1) < 20 or len(kp2) < 20:
-                return None
-            matcher = cv2.BFMatcher(cv2.NORM_L2)
-            matches = matcher.knnMatch(des2, des1, k=2)
-            good = [m for m, n in matches if m.distance < 0.72 * n.distance]
-            if len(good) < 20:
-                return None
-            src = np.float32([kp2[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-            dst = np.float32([kp1[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-            homography, mask = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
-            if homography is None or mask is None:
-                return None
-            inliers = int(np.count_nonzero(mask))
-            if inliers < 30 or inliers < len(good) * 0.15:
-                return None
-
-            # 变换合理性检查：缩放不能大幅跳变、四角不能跑出模板范围
-            sx = float(np.linalg.norm(homography[0, :2]))
-            sy = float(np.linalg.norm(homography[1, :2]))
-            if not (0.7 <= sx <= 1.4 and 0.7 <= sy <= 1.4):
+            homography, mask = cv2.findHomography(scan_corners, ref_corners, cv2.RANSAC, 5.0)
+            if homography is None:
                 return None
             ref_h, ref_w = ref_gray.shape[:2]
-            corners = np.float32([[[0, 0]], [[ref_w, 0]], [[ref_w, ref_h]], [[0, ref_h]]])
-            projected = cv2.perspectiveTransform(corners, homography).reshape(-1, 2)
+            scan_h, scan_w = gray.shape[:2]
+            projected = cv2.perspectiveTransform(
+                np.float32([[[0, 0]], [[scan_w, 0]], [[scan_w, scan_h]], [[0, scan_h]]]),
+                homography,
+            ).reshape(-1, 2)
             margin_x, margin_y = ref_w * 0.15, ref_h * 0.15
             if (
                 projected[:, 0].min() < -margin_x
@@ -386,7 +405,6 @@ class StandardTemplate:
                 or projected[:, 1].max() > ref_h + margin_y
             ):
                 return None
-
             return cv2.warpPerspective(
                 gray, homography, (ref_w, ref_h),
                 flags=cv2.INTER_LINEAR,
