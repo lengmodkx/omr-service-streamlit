@@ -347,13 +347,16 @@ class StandardTemplate:
         先做一次单应对齐，可显著减少选项列整体偏移。
         """
         try:
-            detector = cv2.SIFT_create() if hasattr(cv2, "SIFT_create") else cv2.ORB_create(2000)
+            # 只用 SIFT：ORB 在大量文字/表格线上容易匹配错，错误单应会把整张卡扭到黑边，
+            # 表现就是所有选项都被采成深色（ABCD）。SIFT 不可用时直接放弃，回退 ECC。
+            if not hasattr(cv2, "SIFT_create"):
+                return None
+            detector = cv2.SIFT_create()
             kp1, des1 = detector.detectAndCompute(ref_gray, None)
             kp2, des2 = detector.detectAndCompute(gray, None)
             if des1 is None or des2 is None or len(kp1) < 20 or len(kp2) < 20:
                 return None
-            norm = cv2.NORM_L2 if hasattr(cv2, "SIFT_create") else cv2.NORM_HAMMING
-            matcher = cv2.BFMatcher(norm)
+            matcher = cv2.BFMatcher(cv2.NORM_L2)
             matches = matcher.knnMatch(des2, des1, k=2)
             good = [m for m, n in matches if m.distance < 0.72 * n.distance]
             if len(good) < 20:
@@ -361,10 +364,31 @@ class StandardTemplate:
             src = np.float32([kp2[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
             dst = np.float32([kp1[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
             homography, mask = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
-            if homography is None:
+            if homography is None or mask is None:
                 return None
+            inliers = int(np.count_nonzero(mask))
+            if inliers < 30 or inliers < len(good) * 0.15:
+                return None
+
+            # 变换合理性检查：缩放不能大幅跳变、四角不能跑出模板范围
+            sx = float(np.linalg.norm(homography[0, :2]))
+            sy = float(np.linalg.norm(homography[1, :2]))
+            if not (0.7 <= sx <= 1.4 and 0.7 <= sy <= 1.4):
+                return None
+            ref_h, ref_w = ref_gray.shape[:2]
+            corners = np.float32([[[0, 0]], [[ref_w, 0]], [[ref_w, ref_h]], [[0, ref_h]]])
+            projected = cv2.perspectiveTransform(corners, homography).reshape(-1, 2)
+            margin_x, margin_y = ref_w * 0.15, ref_h * 0.15
+            if (
+                projected[:, 0].min() < -margin_x
+                or projected[:, 0].max() > ref_w + margin_x
+                or projected[:, 1].min() < -margin_y
+                or projected[:, 1].max() > ref_h + margin_y
+            ):
+                return None
+
             return cv2.warpPerspective(
-                gray, homography, (ref_gray.shape[1], ref_gray.shape[0]),
+                gray, homography, (ref_w, ref_h),
                 flags=cv2.INTER_LINEAR,
             )
         except Exception:
