@@ -1,4 +1,4 @@
-﻿"""
+"""
 标准模板对比法 — 核心类
 用一张正确填涂的答题卡同时充当定位基准和标准答案
 """
@@ -339,6 +339,37 @@ class StandardTemplate:
         else:
             return {"answer": None, "status": "uncertain"}
 
+    @staticmethod
+    def _homography_align(gray: np.ndarray, ref_gray: np.ndarray) -> np.ndarray | None:
+        """用 SIFT/ORB 特征点估计目标卡到模板的单应矩阵并透视校正。
+
+        手机拍照不是纯平移/旋转，ECC 的欧式变换无法消除透视；
+        先做一次单应对齐，可显著减少选项列整体偏移。
+        """
+        try:
+            detector = cv2.SIFT_create() if hasattr(cv2, "SIFT_create") else cv2.ORB_create(2000)
+            kp1, des1 = detector.detectAndCompute(ref_gray, None)
+            kp2, des2 = detector.detectAndCompute(gray, None)
+            if des1 is None or des2 is None or len(kp1) < 20 or len(kp2) < 20:
+                return None
+            norm = cv2.NORM_L2 if hasattr(cv2, "SIFT_create") else cv2.NORM_HAMMING
+            matcher = cv2.BFMatcher(norm)
+            matches = matcher.knnMatch(des2, des1, k=2)
+            good = [m for m, n in matches if m.distance < 0.72 * n.distance]
+            if len(good) < 20:
+                return None
+            src = np.float32([kp2[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+            dst = np.float32([kp1[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+            homography, mask = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
+            if homography is None:
+                return None
+            return cv2.warpPerspective(
+                gray, homography, (ref_gray.shape[1], ref_gray.shape[0]),
+                flags=cv2.INTER_LINEAR,
+            )
+        except Exception:
+            return None
+
     def recognize(self, target_img: np.ndarray, debug: bool = False) -> Dict:
         """主入口：全局ECC对齐 → 采样 → 判断 → 对比标准答案。
         设置 debug=True 打印每题的详细采样值，用于诊断识别失败原因。"""
@@ -369,9 +400,13 @@ class StandardTemplate:
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         h, w = gray.shape
 
-        # 全局ECC对齐：将待识别卡片对齐到标准模板，消除扫描偏移
+        # 手机拍照/高扫会有透视/平移：先用特征点单应对齐到模板尺寸，
+        # 否则仅靠 ECC 平移旋转在倾斜照片上会整体偏移（选项采到相邻列）。
         if self.image is not None:
             ref_gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY) if len(self.image.shape) == 3 else self.image
+            warped = self._homography_align(gray, ref_gray)
+            if warped is not None:
+                blurred = cv2.GaussianBlur(warped, (5, 5), 0)
             ref_blur = cv2.GaussianBlur(ref_gray, (5, 5), 0)
             if blurred.shape != ref_blur.shape:
                 blurred = cv2.resize(blurred, (ref_blur.shape[1], ref_blur.shape[0]))
